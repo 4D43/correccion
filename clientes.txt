@@ -1,0 +1,5 @@
+ID  Nombre  Apellido    Teléfono    Email
+1   Juan    Pérez   999888777   juan.perez@email.com
+2   Ana Gómez   988777666   ana.gomez@email.com
+3   Luis    Martínez    977666555   luis.martinez@email.com
+4   Sofía   Ramos   966555444   sofia.ramos@email.com
