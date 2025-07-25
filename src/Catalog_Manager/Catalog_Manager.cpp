@@ -7,17 +7,31 @@
 #include <sstream>   // For std::stringstream
 #include <filesystem> // For path operations
 
+// Incluir record_manager.h para obtener las definiciones completas de RecordManager, Record, BlockHeader, SlotDirectoryEntry
+#include "../record_manager/record_manager.h" 
+
 // Constructor
-CatalogManager::CatalogManager(BufferManager& buffer_manager, RecordManager& record_manager)
-    : buffer_manager_(buffer_manager), record_manager_(record_manager),
-      catalog_page_id_(0), // Asumimos que la primera CATALOG_PAGE será PageId 0 (o una conocida)
-      next_table_id_(1)    // TableId 0 podría ser reservado o simplemente empezar en 1
+CatalogManager::CatalogManager(BufferManager& buffer_manager)
+    : buffer_manager_(buffer_manager), record_manager_(nullptr), // Inicializar puntero a nullptr
+      catalog_page_id_(0), 
+      next_table_id_(1)    
 {
     std::cout << "CatalogManager inicializado." << std::endl;
 }
 
+// Método setter para el RecordManager
+void CatalogManager::SetRecordManager(RecordManager& record_manager) {
+    record_manager_ = &record_manager;
+}
+
 // Inicializa el catálogo (crea la primera CATALOG_PAGE si no existe).
 Status CatalogManager::InitCatalog() {
+    // Asegurarse de que record_manager_ esté configurado
+    if (record_manager_ == nullptr) {
+        std::cerr << "Error (InitCatalog): RecordManager no ha sido configurado en CatalogManager." << std::endl;
+        return Status::ERROR;
+    }
+
     // Intentar cargar el catálogo primero.
     Status load_status = LoadCatalog();
     if (load_status == Status::OK) {
@@ -28,312 +42,200 @@ Status CatalogManager::InitCatalog() {
     // Si no se pudo cargar (ej. NOT_FOUND), significa que es un catálogo nuevo.
     std::cout << "Catálogo no encontrado. Creando nueva CATALOG_PAGE..." << std::endl;
     
-    // Asignar una nueva CATALOG_PAGE.
-    // NewPage ya ancla la página (pin_count = 1).
     PageId new_catalog_page_id;
-    Byte* page_data = buffer_manager_.NewPage(new_catalog_page_id, PageType::CATALOG_PAGE);
-    if (page_data == nullptr) {
-        std::cerr << "Error (InitCatalog): No se pudo asignar una nueva CATALOG_PAGE." << std::endl;
+    Byte* catalog_page_data = buffer_manager_.NewPage(new_catalog_page_id, PageType::CATALOG_PAGE);
+    if (catalog_page_data == nullptr) {
+        std::cerr << "Error (InitCatalog): Fallo al crear la CATALOG_PAGE." << std::endl;
         return Status::ERROR;
     }
-    catalog_page_id_ = new_catalog_page_id;
+    catalog_page_id_ = new_catalog_page_id; 
 
-    // Inicializar la nueva CATALOG_PAGE como una página de datos para registros (de metadatos).
-    // InitDataPage internamente hará un FetchPage (pin_count++) y UnpinPage (pin_count--).
-    // Al final de InitDataPage, la página seguirá anclada una vez por la llamada a NewPage.
-    Status init_status = record_manager_.InitDataPage(catalog_page_id_);
+    // Inicializar la página del catálogo como una página de datos vacía para registros de metadatos.
+    Status init_status = record_manager_->InitDataPage(catalog_page_id_);
     if (init_status != Status::OK) {
-        std::cerr << "Error (InitCatalog): Fallo al inicializar la nueva CATALOG_PAGE " << catalog_page_id_ << "." << std::endl;
-        // Si InitDataPage falla, la página podría quedar anclada. Desanclarla y eliminarla.
-        buffer_manager_.UnpinPage(catalog_page_id_, true); // Desanclar y marcar sucia para asegurar flush si algo se escribió
-        buffer_manager_.DeletePage(catalog_page_id_);
+        std::cerr << "Error (InitCatalog): Fallo al inicializar la CATALOG_PAGE como DATA_PAGE." << std::endl;
+        buffer_manager_.UnpinPage(catalog_page_id_, false); 
         return init_status;
     }
-    // Desanclar la página del catálogo que fue creada por NewPage.
-    // Esto es crucial para que su pin_count sea 0 antes de cualquier operación que requiera 0 pins.
-    buffer_manager_.UnpinPage(catalog_page_id_, true); // Marcar sucia porque se inicializó
+    
+    buffer_manager_.UnpinPage(catalog_page_id_, true); 
 
-    // Guardar el catálogo vacío para persistir la existencia de la CATALOG_PAGE.
-    Status save_status = SaveCatalog();
-    if (save_status != Status::OK) {
-        std::cerr << "Error (InitCatalog): Fallo al guardar el catálogo inicial." << std::endl;
-        return save_status;
-    }
-
-    std::cout << "Nueva CATALOG_PAGE creada con PageId: " << catalog_page_id_ << std::endl;
-    std::cout << "Catálogo inicializado exitosamente." << std::endl;
+    std::cout << "Nueva CATALOG_PAGE creada exitosamente con PageId: " << catalog_page_id_ << std::endl;
     return Status::OK;
 }
 
-// Serializa FullTableSchema a un Record.
-Record CatalogManager::SerializeTableSchema(const FullTableSchema& schema) const {
-    Record record;
-    // Calcular el tamaño total del record serializado
-    size_t total_size = sizeof(TableMetadata) + sizeof(uint32_t); // Base metadata + num_columns
-    total_size += schema.columns.size() * sizeof(ColumnMetadata); // Column metadata
-
-    record.data.resize(total_size);
-    Byte* ptr = record.data.data();
-
-    // 1. Copiar TableMetadata
-    std::memcpy(ptr, &schema.base_metadata, sizeof(TableMetadata));
-    ptr += sizeof(TableMetadata);
-
-    // 2. Copiar num_columns
-    uint32_t num_columns = schema.columns.size();
-    std::memcpy(ptr, &num_columns, sizeof(uint32_t));
-    ptr += sizeof(uint32_t);
-
-    // 3. Copiar cada ColumnMetadata
-    for (const auto& col : schema.columns) {
-        std::memcpy(ptr, &col, sizeof(ColumnMetadata));
-        ptr += sizeof(ColumnMetadata);
+// Crea una nueva tabla y la registra en el catálogo.
+Status CatalogManager::CreateTable(const std::string& table_name, const std::vector<ColumnMetadata>& columns, bool is_fixed_length_record) {
+    if (record_manager_ == nullptr) {
+        std::cerr << "Error (CreateTable): RecordManager no ha sido configurado en CatalogManager." << std::endl;
+        return Status::ERROR;
     }
-    return record;
-}
 
-// Deserializa un Record a FullTableSchema.
-FullTableSchema CatalogManager::DeserializeTableSchema(const Record& record) const {
-    FullTableSchema schema;
-    const Byte* ptr = record.data.data();
-
-    // 1. Leer TableMetadata
-    std::memcpy(&schema.base_metadata, ptr, sizeof(TableMetadata));
-    ptr += sizeof(TableMetadata);
-
-    // 2. Leer num_columns
-    uint32_t num_columns;
-    std::memcpy(&num_columns, ptr, sizeof(uint32_t));
-    ptr += sizeof(uint32_t);
-
-    // 3. Leer cada ColumnMetadata
-    schema.columns.resize(num_columns);
-    for (uint32_t i = 0; i < num_columns; ++i) {
-        std::memcpy(&schema.columns[i], ptr, sizeof(ColumnMetadata));
-        ptr += sizeof(ColumnMetadata);
-    }
-    return schema;
-}
-
-// Crea una nueva tabla y persiste su metadata (interactivo/formulario).
-Status CatalogManager::CreateTable(const std::string& table_name,
-                                   const std::vector<ColumnMetadata>& columns,
-                                   bool is_fixed_length_record) {
     if (table_schemas_.count(table_name) > 0) {
         std::cerr << "Error (CreateTable): La tabla '" << table_name << "' ya existe." << std::endl;
         return Status::DUPLICATE_ENTRY;
     }
 
-    // 1. Asignar un nuevo TableId
-    uint32_t new_table_id = next_table_id_++;
+    uint32_t current_table_id = next_table_id_++;
 
-    // 2. Asignar la primera DATA_PAGE para esta nueva tabla
     PageId first_data_page_id;
-    Byte* data_page_ptr = buffer_manager_.NewPage(first_data_page_id, PageType::DATA_PAGE);
-    if (data_page_ptr == nullptr) {
-        std::cerr << "Error (CreateTable): No se pudo asignar la primera DATA_PAGE para la tabla '" << table_name << "'." << std::endl;
-        next_table_id_--; // Revertir el TableId
+    Byte* data_page_data = buffer_manager_.NewPage(first_data_page_id, PageType::DATA_PAGE);
+    if (data_page_data == nullptr) {
+        std::cerr << "Error (CreateTable): Fallo al crear la primera DATA_PAGE para la tabla '" << table_name << "'." << std::endl;
         return Status::ERROR;
     }
-    // Inicializar la nueva DATA_PAGE
-    Status init_data_page_status = record_manager_.InitDataPage(first_data_page_id);
+    Status init_data_page_status = record_manager_->InitDataPage(first_data_page_id);
     if (init_data_page_status != Status::OK) {
-        std::cerr << "Error (CreateTable): Fallo al inicializar la primera DATA_PAGE " << first_data_page_id << " para la tabla '" << table_name << "'." << std::endl;
-        // Asegurarse de desanclar y eliminar la página si la inicialización falla
-        buffer_manager_.UnpinPage(first_data_page_id, true);
-        buffer_manager_.DeletePage(first_data_page_id);
-        next_table_id_--;
+        std::cerr << "Error (CreateTable): Fallo al inicializar la primera DATA_PAGE para la tabla '" << table_name << "'." << std::endl;
+        buffer_manager_.DeletePage(first_data_page_id); 
         return init_data_page_status;
     }
-    // Desanclar la página de datos después de inicializarla
-    buffer_manager_.UnpinPage(first_data_page_id, true);
 
-    // 3. Crear la metadata de la tabla
     FullTableSchema new_schema;
-    new_schema.base_metadata.table_id = new_table_id;
+    new_schema.base_metadata.table_id = current_table_id;
     strncpy(new_schema.base_metadata.table_name, table_name.c_str(), sizeof(new_schema.base_metadata.table_name) - 1);
     new_schema.base_metadata.table_name[sizeof(new_schema.base_metadata.table_name) - 1] = '\0';
     new_schema.base_metadata.is_fixed_length_record = is_fixed_length_record;
-    new_schema.base_metadata.first_data_page_id = first_data_page_id;
-    new_schema.base_metadata.num_records = 0; // Inicialmente 0 registros
-    new_schema.columns = columns;
+    new_schema.base_metadata.data_page_ids.push_back(first_data_page_id); 
+    new_schema.base_metadata.num_records = 0; 
 
-    // Calcular fixed_record_size si aplica
+    new_schema.columns = columns; 
+
     if (is_fixed_length_record) {
-        uint32_t total_fixed_size = 0;
+        uint32_t total_size = 0;
         for (const auto& col : columns) {
-            if (col.type == ColumnType::VARCHAR) {
-                std::cerr << "Error (CreateTable): No se puede tener VARCHAR en una tabla de longitud fija." << std::endl;
-                buffer_manager_.DeletePage(first_data_page_id);
-                next_table_id_--;
-                return Status::INVALID_PARAMETER;
-            }
-            total_fixed_size += col.size;
+            total_size += col.size;
         }
-        new_schema.base_metadata.fixed_record_size = total_fixed_size;
+        new_schema.base_metadata.fixed_record_size = total_size;
     } else {
-        new_schema.base_metadata.fixed_record_size = 0; // No aplica para variable
+        new_schema.base_metadata.fixed_record_size = 0; 
     }
 
-    // 4. Añadir a nuestro mapa en memoria para acceso rápido
-    table_schemas_[table_name] = new_schema;
+    table_schemas_[table_name] = new_schema; 
 
-    // 5. Persistir el catálogo actualizado (ahora se guarda todo el mapa en memoria)
+    std::cout << "Tabla '" << table_name << "' creada. Primera DATA_PAGE: " << first_data_page_id << std::endl;
+
     Status save_status = SaveCatalog();
     if (save_status != Status::OK) {
-        std::cerr << "Advertencia (CreateTable): La tabla se creó, pero falló la persistencia del catálogo. Los datos podrían perderse." << std::endl;
-        // Podríamos considerar revertir la creación de la tabla aquí si esto fuera crítico.
+        std::cerr << "Advertencia (CreateTable): Fallo al guardar el catálogo después de crear la tabla '" << table_name << "'." << std::endl;
     }
 
-    std::cout << "Tabla '" << table_name << "' (ID: " << new_table_id
-              << ", Primera Página de Datos: " << first_data_page_id
-              << ") creada exitosamente y registrada en el catálogo." << std::endl;
     return Status::OK;
 }
 
-// Crea una nueva tabla y persiste su metadata a partir de un archivo de texto.
+// Crea una nueva tabla a partir de un archivo de texto (esquema inferido).
 Status CatalogManager::CreateTableFromPath(const std::string& file_path) {
-    std::cout << "Creando tabla desde archivo: " << file_path << std::endl;
-
-    // 1. Obtener el nombre de la tabla del nombre del archivo
-    std::filesystem::path path_obj(file_path);
-    std::string table_name = path_obj.stem().string(); // "stem" obtiene el nombre del archivo sin extensión
-
-    if (table_schemas_.count(table_name) > 0) {
-        std::cerr << "Error (CreateTableFromPath): La tabla '" << table_name << "' ya existe." << std::endl;
-        return Status::DUPLICATE_ENTRY;
-    }
-
-    // 2. Abrir el archivo y leer las primeras dos líneas: nombres y datos para inferencia
     std::ifstream file(file_path);
     if (!file.is_open()) {
         std::cerr << "Error (CreateTableFromPath): No se pudo abrir el archivo: " << file_path << std::endl;
         return Status::IO_ERROR;
     }
 
-    std::string column_names_line;
-    std::string first_data_line; // Esta línea se usará para inferir tipos
-
-    // Leer la primera línea (nombres de columnas)
-    if (!std::getline(file, column_names_line)) {
-        std::cerr << "Error (CreateTableFromPath): El archivo no tiene la línea de nombres de columna." << std::endl;
-        file.close();
-        return Status::INVALID_PARAMETER;
-    }
-    // Leer la segunda línea (primera fila de datos para inferencia de tipos)
-    if (!std::getline(file, first_data_line)) {
-        std::cerr << "Error (CreateTableFromPath): El archivo no tiene al menos una fila de datos para inferir tipos." << std::endl;
-        file.close();
-        return Status::INVALID_PARAMETER;
-    }
-    file.close(); // Cerramos el archivo después de leer las líneas de esquema/inferencia.
-
-    // 3. Parsear nombres de columnas (asumiendo coma como delimitador)
-    std::vector<std::string> names;
-    std::stringstream ss_names(column_names_line);
-    std::string name_token;
-    while (std::getline(ss_names, name_token, ',')) {
-        // Eliminar espacios en blanco alrededor del token
-        name_token.erase(0, name_token.find_first_not_of(" \t\n\r\f\v"));
-        name_token.erase(name_token.find_last_not_of(" \t\n\r\f\v") + 1);
-        names.push_back(name_token);
+    std::string table_name = std::filesystem::path(file_path).stem().string();
+    if (table_schemas_.count(table_name) > 0) {
+        std::cerr << "Error (CreateTableFromPath): La tabla '" << table_name << "' ya existe." << std::endl;
+        return Status::DUPLICATE_ENTRY;
     }
 
-    // 4. Parsear la primera línea de datos para inferir tipos y tamaños
+    std::string line;
+    std::getline(file, line); 
+    std::stringstream ss_names(line);
+    std::string col_name_str;
+
+    std::getline(file, line); 
+    std::stringstream ss_types(line);
+    std::string col_type_str;
+    std::string sample_data_str;
+
     std::vector<ColumnMetadata> columns;
-    std::stringstream ss_data(first_data_line);
-    std::string data_token;
-    bool is_fixed_length_record = true; // Asumimos fija por defecto
-
-    for (const std::string& name : names) {
-        if (!std::getline(ss_data, data_token, ',')) {
-            std::cerr << "Error (CreateTableFromPath): Número de valores en la fila de datos no coincide con el número de nombres de columna." << std::endl;
-            return Status::INVALID_PARAMETER;
-        }
-        // Eliminar espacios en blanco alrededor del token de datos
-        data_token.erase(0, data_token.find_first_not_of(" \t\n\r\f\v"));
-        data_token.erase(data_token.find_last_not_of(" \t\n\r\f\v") + 1);
-
+    bool is_fixed_length_record = true; 
+    
+    while (std::getline(ss_names, col_name_str, '#') && std::getline(ss_types, col_type_str, '#')) {
         ColumnMetadata col;
-        strncpy(col.name, name.c_str(), sizeof(col.name) - 1);
+        strncpy(col.name, col_name_str.c_str(), sizeof(col.name) - 1);
         col.name[sizeof(col.name) - 1] = '\0';
 
-        // Intentar inferir tipo: INT o VARCHAR
-        bool is_int = true;
-        if (data_token.empty()) { // Cadena vacía no es INT
-            is_int = false;
-        } else {
-            // Verificar si todos los caracteres son dígitos, opcionalmente con un signo al principio
-            size_t start_idx = 0;
-            if (data_token[0] == '-' || data_token[0] == '+') {
-                start_idx = 1;
-            }
-            for (size_t i = start_idx; i < data_token.length(); ++i) {
-                if (!std::isdigit(data_token[i])) {
-                    is_int = false;
-                    break;
-                }
-            }
-        }
-        
-        if (is_int) {
+        std::string lower_col_type = col_type_str;
+        std::transform(lower_col_type.begin(), lower_col_type.end(), lower_col_type.begin(), ::tolower);
+
+        if (lower_col_type == "int") {
             col.type = ColumnType::INT;
-            col.size = sizeof(int); // Tamaño fijo para INT
+            col.size = sizeof(int);
+        } else if (lower_col_type.rfind("char(", 0) == 0) { 
+            col.type = ColumnType::CHAR;
+            size_t start_pos = lower_col_type.find('(');
+            size_t end_pos = lower_col_type.find(')');
+            if (start_pos != std::string::npos && end_pos != std::string::npos && end_pos > start_pos) {
+                col.size = std::stoul(lower_col_type.substr(start_pos + 1, end_pos - start_pos - 1));
+            } else {
+                col.size = 255; 
+                std::cerr << "Advertencia: Formato CHAR inválido para columna " << col.name << ". Usando tamaño por defecto de 255." << std::endl;
+            }
+        } else if (lower_col_type.rfind("varchar(", 0) == 0) { 
+            col.type = ColumnType::VARCHAR;
+            is_fixed_length_record = false; 
+            size_t start_pos = lower_col_type.find('(');
+            size_t end_pos = lower_col_type.find(')');
+            if (start_pos != std::string::npos && end_pos != std::string::npos && end_pos > start_pos) {
+                col.size = std::stoul(lower_col_type.substr(start_pos + 1, end_pos - start_pos - 1));
+            } else {
+                col.size = 255; 
+                std::cerr << "Advertencia: Formato VARCHAR inválido para columna " << col.name << ". Usando tamaño por defecto de 255." << std::endl;
+            }
         } else {
-            col.type = ColumnType::VARCHAR; // Si no es INT, asumimos VARCHAR (cadena variable)
-            col.size = data_token.length(); // El tamaño será la longitud de la cadena de ejemplo
-            is_fixed_length_record = false; // Si hay un VARCHAR, la tabla es de longitud variable
+            std::cerr << "Advertencia: Tipo de columna desconocido '" << col_type_str << "' para columna " << col.name << ". Usando INT por defecto." << std::endl;
+            col.type = ColumnType::INT;
+            col.size = sizeof(int);
         }
         columns.push_back(col);
     }
+    file.close();
 
-    // 5. Llamar a CreateTable con el esquema parseado
     return CreateTable(table_name, columns, is_fixed_length_record);
 }
 
-// Obtiene la metadata completa de una tabla por su nombre.
+// Obtiene el esquema completo de una tabla.
 Status CatalogManager::GetTableSchema(const std::string& table_name, FullTableSchema& schema) {
     auto it = table_schemas_.find(table_name);
-    if (it != table_schemas_.end()) {
-        schema = it->second;
-        return Status::OK;
+    if (it == table_schemas_.end()) {
+        std::cerr << "Error (GetTableSchema): La tabla '" << table_name << "' no existe en el catálogo." << std::endl;
+        return Status::NOT_FOUND;
     }
-    std::cerr << "Error (GetTableSchema): Tabla '" << table_name << "' no encontrada en el catálogo." << std::endl;
-    return Status::NOT_FOUND;
+    schema = it->second; 
+    return Status::OK;
 }
 
-// Elimina una tabla y toda su metadata del catálogo.
+// Elimina una tabla del catálogo.
 Status CatalogManager::DropTable(const std::string& table_name) {
+    if (record_manager_ == nullptr) {
+        std::cerr << "Error (DropTable): RecordManager no ha sido configurado en CatalogManager." << std::endl;
+        return Status::ERROR;
+    }
+
     auto it = table_schemas_.find(table_name);
     if (it == table_schemas_.end()) {
-        std::cerr << "Error (DropTable): Tabla '" << table_name << "' no encontrada en el catálogo." << std::endl;
+        std::cerr << "Error (DropTable): La tabla '" << table_name << "' no existe." << std::endl;
         return Status::NOT_FOUND;
     }
 
-    FullTableSchema schema_to_drop = it->second;
+    FullTableSchema schema_to_delete = it->second;
 
-    // 1. Eliminar la metadata de la tabla del mapa en memoria.
-    table_schemas_.erase(it);
-
-    // 2. Liberar todas las páginas de datos asociadas a la tabla.
-    // Por ahora, solo tenemos first_data_page_id. En un SGBD real, las tablas tendrían
-    // una lista de PageIds o un PageDirectory.
-    Status delete_page_status = buffer_manager_.DeletePage(schema_to_drop.base_metadata.first_data_page_id);
-    if (delete_page_status != Status::OK) {
-        std::cerr << "Advertencia (DropTable): Fallo al eliminar la primera DATA_PAGE " << schema_to_drop.base_metadata.first_data_page_id
-                  << " de la tabla '" << table_name << "'. Estado: " << StatusToString(delete_page_status) << std::endl;
-        // Podríamos considerar reinsertar la tabla en table_schemas_ si la eliminación de la página falla.
-    } else {
-        std::cout << "Primera DATA_PAGE " << schema_to_drop.base_metadata.first_data_page_id << " de la tabla '" << table_name << "' eliminada." << std::endl;
+    for (PageId page_id : schema_to_delete.base_metadata.data_page_ids) {
+        Status delete_status = buffer_manager_.DeletePage(page_id);
+        if (delete_status != Status::OK) {
+            std::cerr << "Advertencia (DropTable): Fallo al eliminar la página de datos " << page_id << " para la tabla '" << table_name << "'." << std::endl;
+        }
     }
 
-    // 3. Persistir el catálogo actualizado (sin la tabla eliminada).
+    table_schemas_.erase(it); 
+
+    std::cout << "Tabla '" << table_name << "' eliminada del catálogo." << std::endl;
+
     Status save_status = SaveCatalog();
     if (save_status != Status::OK) {
-        std::cerr << "Advertencia (DropTable): La tabla se eliminó, pero falló la persistencia del catálogo. El catálogo podría estar inconsistente." << std::endl;
+        std::cerr << "Advertencia (DropTable): Fallo al guardar el catálogo después de eliminar la tabla '" << table_name << "'." << std::endl;
     }
 
-    std::cout << "Tabla '" << table_name << "' eliminada exitosamente del catálogo." << std::endl;
     return Status::OK;
 }
 
@@ -343,137 +245,274 @@ Status CatalogManager::ListTables(std::vector<std::string>& table_names) {
     for (const auto& pair : table_schemas_) {
         table_names.push_back(pair.first);
     }
-    if (table_names.empty()) {
-        std::cout << "No hay tablas registradas en el catálogo." << std::endl;
-    }
     return Status::OK;
 }
 
 // Método para cargar todo el catálogo desde las CATALOG_PAGEs.
 Status CatalogManager::LoadCatalog() {
-    // Asumimos que la primera CATALOG_PAGE es la PageId 1 (o la que se asignó en InitCatalog)
-    // En un sistema real, el DiskManager o un SuperBlock sabría la PageId del Catálogo.
-    // Por ahora, si catalog_page_id_ es 0, intentamos cargar la PageId 1.
-    if (catalog_page_id_ == 0) {
-        // Intentar cargar la PageId 1 como la CATALOG_PAGE inicial.
-        // Esto es una heurística para la primera carga después de un reinicio.
-        // Si no existe, NewPage la creará.
-        // Si existe, FetchPage la cargará.
-        // Necesitamos una forma de saber si PageId 1 es realmente una CATALOG_PAGE.
-        // Por ahora, asumiremos que si existe y es una DATA_PAGE, es nuestro catálogo.
-        // Una mejor forma sería que el DiskMetadata o un SuperBlock guardara la PageId del catálogo.
-        
-        // Para la primera carga, si no se ha creado el disco, no habrá PageId 1.
-        // Si el disco se creó, PageId 0 es metadata, PageId 1 es la primera DATA_PAGE o CATALOG_PAGE.
-        // Intentaremos cargar PageId 1 y verificar su tipo.
-        Byte* page_data_check = buffer_manager_.FetchPage(1); // Try to fetch PageId 1
-        if (page_data_check == nullptr) {
-            std::cerr << "Error (LoadCatalog): No se pudo cargar PageId 1. El catálogo podría no existir o el disco no está inicializado." << std::endl;
-            return Status::NOT_FOUND;
-        }
-        BlockHeader header_check;
-        std::memcpy(&header_check, page_data_check, sizeof(BlockHeader));
-        buffer_manager_.UnpinPage(1, false); // Unpin immediately
-
-        if (header_check.page_type != PageType::CATALOG_PAGE && header_check.page_type != PageType::DATA_PAGE) {
-            std::cerr << "Error (LoadCatalog): PageId 1 no es una CATALOG_PAGE ni DATA_PAGE. Tipo: " << PageTypeToString(header_check.page_type) << std::endl;
-            return Status::ERROR; // O un estado más específico
-        }
-        catalog_page_id_ = 1; // Asumimos que PageId 1 es nuestra CATALOG_PAGE
-    }
-
-    std::cout << "Cargando catálogo desde CATALOG_PAGE (PageId " << catalog_page_id_ << ")..." << std::endl;
-
-    table_schemas_.clear(); // Limpiar el mapa en memoria antes de cargar
-
-    // Leer todos los registros de la CATALOG_PAGE
-    Byte* catalog_page_data = buffer_manager_.FetchPage(catalog_page_id_);
-    if (catalog_page_data == nullptr) {
-        std::cerr << "Error (LoadCatalog): No se pudo obtener la CATALOG_PAGE " << catalog_page_id_ << " del BufferManager." << std::endl;
+    if (record_manager_ == nullptr) {
+        std::cerr << "Error (LoadCatalog): RecordManager no ha sido configurado en CatalogManager." << std::endl;
         return Status::ERROR;
     }
 
-    BlockHeader header = record_manager_.ReadBlockHeader(catalog_page_data); // Usar RecordManager para leer cabecera
-    buffer_manager_.UnpinPage(catalog_page_id_, false); // Desanclar la página después de leer la cabecera
+    if (catalog_page_id_ == 0) {
+        if (buffer_manager_.GetNumBufferedPages() == 0 && buffer_manager_.GetFreeFramesCount() == buffer_manager_.GetPoolSize()) {
+            return Status::NOT_FOUND;
+        }
+        catalog_page_id_ = 1; 
+    }
 
-    // Iterar sobre todos los slots de la CATALOG_PAGE
+    Byte* catalog_page_data = buffer_manager_.FetchPage(catalog_page_id_);
+    if (catalog_page_data == nullptr) {
+        std::cerr << "Error (LoadCatalog): No se pudo obtener la CATALOG_PAGE " << catalog_page_id_ << " del BufferManager." << std::endl;
+        return Status::NOT_FOUND; 
+    }
+
+    BlockHeader header = record_manager_->ReadBlockHeader(catalog_page_data);
+    if (header.page_type != PageType::CATALOG_PAGE && header.page_type != PageType::DATA_PAGE) { 
+        std::cerr << "Error (LoadCatalog): La página " << catalog_page_id_ << " no es de tipo CATALOG_PAGE o DATA_PAGE. Tipo: " << PageTypeToString(header.page_type) << std::endl;
+        buffer_manager_.UnpinPage(catalog_page_id_, false);
+        return Status::INVALID_PAGE_TYPE;
+    }
+
+    table_schemas_.clear(); 
+    next_table_id_ = 1;     
+
     for (uint32_t i = 0; i < header.num_slots; ++i) {
-        Record catalog_record;
-        Status get_record_status = record_manager_.GetRecord(catalog_page_id_, i, catalog_record);
-        if (get_record_status == Status::OK) {
-            FullTableSchema schema = DeserializeTableSchema(catalog_record);
-            table_schemas_[schema.base_metadata.table_name] = schema;
-            // Actualizar next_table_id_ para que sea mayor que cualquier TableId cargado
-            if (schema.base_metadata.table_id >= next_table_id_) {
-                next_table_id_ = schema.base_metadata.table_id + 1;
+        SlotDirectoryEntry entry = record_manager_->ReadSlotEntry(catalog_page_data, i);
+        if (entry.is_occupied) {
+            Record schema_record;
+            Status get_record_status = record_manager_->GetRecord(catalog_page_id_, i, schema_record);
+            if (get_record_status != Status::OK) {
+                std::cerr << "Error (LoadCatalog): Fallo al obtener el registro de esquema del slot " << i << "." << std::endl;
+                continue;
             }
-        } else if (get_record_status != Status::NOT_FOUND) {
-            // Si no es NOT_FOUND, es un error real al leer el registro
-            std::cerr << "Error (LoadCatalog): Fallo al leer el registro del catálogo en slot " << i << "." << std::endl;
-            return get_record_status;
+            FullTableSchema schema = DeserializeTableSchema(schema_record);
+            table_schemas_[schema.base_metadata.table_name] = schema;
+            if (schema.base_metadata.table_id >= next_table_id_) {
+                next_table_id_ = schema.base_metadata.table_id + 1; 
+            }
         }
     }
 
-    std::cout << "Catálogo cargado. " << table_schemas_.size() << " tablas encontradas." << std::endl;
+    buffer_manager_.UnpinPage(catalog_page_id_, false); 
     return Status::OK;
 }
 
 // Método para guardar todo el catálogo en las CATALOG_PAGEs.
 Status CatalogManager::SaveCatalog() {
-    std::cout << "Guardando catálogo en CATALOG_PAGE (PageId " << catalog_page_id_ << ")..." << std::endl;
+    if (record_manager_ == nullptr) {
+        std::cerr << "Error (SaveCatalog): RecordManager no ha sido configurado en CatalogManager." << std::endl;
+        return Status::ERROR;
+    }
 
-    // Obtener la página del catálogo.
-    // La página debe estar desanclada para poder ser modificada de esta forma.
-    // Si no está en el buffer, FetchPage la cargará y la anclará.
     Byte* catalog_page_data = buffer_manager_.FetchPage(catalog_page_id_);
     if (catalog_page_data == nullptr) {
         std::cerr << "Error (SaveCatalog): No se pudo obtener la CATALOG_PAGE " << catalog_page_id_ << " del BufferManager." << std::endl;
         return Status::ERROR;
     }
 
-    // Resetear la cabecera de la página del catálogo para "limpiarla".
-    // Esto marca todos los slots como libres y el espacio como disponible.
-    // Es como si la página estuviera recién inicializada, pero sin reasignar en disco.
-    BlockHeader header;
-    header.page_id = catalog_page_id_;
-    header.page_type = PageType::CATALOG_PAGE; // Asegurarse de que el tipo sea correcto
-    header.num_slots = 0;
-    header.header_and_slot_directory_size = record_manager_.GetSlotDirectoryStartOffset(); // Solo la cabecera fija
-    header.data_end_offset = buffer_manager_.GetBlockSize(); // Todo el espacio disponible
+    Status init_status = record_manager_->InitDataPage(catalog_page_id_); 
+    if (init_status != Status::OK) {
+        std::cerr << "Error (SaveCatalog): Fallo al inicializar la CATALOG_PAGE antes de guardar." << std::endl;
+        return init_status;
+    }
 
-    record_manager_.WriteBlockHeader(catalog_page_data, header);
-    // Opcional: Llenar el resto del bloque con ceros para claridad (debug).
-    std::fill(catalog_page_data + header.header_and_slot_directory_size, 
-              catalog_page_data + buffer_manager_.GetBlockSize(), 0);
+    catalog_page_data = buffer_manager_.FetchPage(catalog_page_id_);
+    if (catalog_page_data == nullptr) {
+        std::cerr << "Error (SaveCatalog): No se pudo obtener la CATALOG_PAGE " << catalog_page_id_ << " después de inicializarla." << std::endl;
+        return Status::ERROR;
+    }
 
-    // Insertar cada esquema de tabla como un nuevo registro en la CATALOG_PAGE
     for (const auto& pair : table_schemas_) {
         Record catalog_record = SerializeTableSchema(pair.second);
         uint32_t slot_id;
-        // InsertRecord ancla y desancla la página internamente, pero la deja sucia.
-        Status insert_status = record_manager_.InsertRecord(catalog_page_id_, catalog_record, slot_id);
+        Status insert_status = record_manager_->InsertRecord(catalog_page_id_, catalog_record, slot_id);
         if (insert_status != Status::OK) {
             std::cerr << "Error (SaveCatalog): Fallo al insertar la metadata de la tabla '" << pair.first << "' en el catálogo." << std::endl;
-            // Desanclar la página antes de retornar en caso de error
-            buffer_manager_.UnpinPage(catalog_page_id_, true);
+            buffer_manager_.UnpinPage(catalog_page_id_, true); 
             return insert_status;
         }
     }
 
-    // Desanclar la página del catálogo después de haber insertado todos los registros.
-    // Marcarla como sucia para que los cambios se persistan.
     buffer_manager_.UnpinPage(catalog_page_id_, true);
 
     std::cout << "Catálogo guardado exitosamente." << std::endl;
     return Status::OK;
 }
 
-// Método auxiliar para encontrar un slot libre o crear uno nuevo en la CATALOG_PAGE.
-// (Este método ya no es directamente necesario con la estrategia de reescritura completa en SaveCatalog,
-// pero se mantiene por si se cambia a una gestión de slots más granular).
-Status CatalogManager::FindOrCreateCatalogSlot(uint32_t& slot_id) {
-    // Implementación futura: buscar slot libre en catalog_page_id_
-    // o expandir la página / crear una nueva CATALOG_PAGE si la actual está llena.
-    // Por ahora, InsertRecord de RecordManager ya maneja la asignación de slots.
+// NUEVO: Método para añadir una nueva PageId de datos a una tabla existente.
+Status CatalogManager::AddDataPageToTable(const std::string& table_name, PageId new_data_page_id) {
+    auto it = table_schemas_.find(table_name);
+    if (it == table_schemas_.end()) {
+        std::cerr << "Error (AddDataPageToTable): La tabla '" << table_name << "' no existe." << std::endl;
+        return Status::NOT_FOUND;
+    }
+
+    it->second.base_metadata.data_page_ids.push_back(new_data_page_id);
+
+    std::cout << "PageId " << new_data_page_id << " añadida a la tabla '" << table_name << "'." << std::endl;
+
+    Status save_status = SaveCatalog();
+    if (save_status != Status::OK) {
+        std::cerr << "Advertencia (AddDataPageToTable): Fallo al guardar el catálogo después de añadir una página a la tabla '" << table_name << "'." << std::endl;
+    }
     return Status::OK;
+}
+
+// NUEVO: Método para actualizar el número de registros de una tabla.
+Status CatalogManager::UpdateTableNumRecords(const std::string& table_name, uint32_t new_num_records) {
+    auto it = table_schemas_.find(table_name);
+    if (it == table_schemas_.end()) {
+        std::cerr << "Error (UpdateTableNumRecords): La tabla '" << table_name << "' no existe." << std::endl;
+        return Status::NOT_FOUND;
+    }
+
+    it->second.base_metadata.num_records = new_num_records;
+
+    std::cout << "Número de registros para la tabla '" << table_name << "' actualizado a " << new_num_records << "." << std::endl;
+
+    Status save_status = SaveCatalog();
+    if (save_status != Status::OK) {
+        std::cerr << "Advertencia (UpdateTableNumRecords): Fallo al guardar el catálogo después de actualizar el conteo de registros para la tabla '" << table_name << "'." << std::endl;
+    }
+    return Status::OK;
+}
+
+
+// Métodos auxiliares para serializar/deserializar FullTableSchema a/desde Record.
+Record CatalogManager::SerializeTableSchema(const FullTableSchema& schema) const {
+    std::vector<Byte> data;
+    size_t offset = 0;
+
+    // Serializar TableMetadata
+    // table_id
+    data.resize(offset + sizeof(schema.base_metadata.table_id));
+    std::memcpy(data.data() + offset, &schema.base_metadata.table_id, sizeof(schema.base_metadata.table_id));
+    offset += sizeof(schema.base_metadata.table_id);
+
+    // table_name
+    data.resize(offset + sizeof(schema.base_metadata.table_name));
+    std::memcpy(data.data() + offset, schema.base_metadata.table_name, sizeof(schema.base_metadata.table_name));
+    offset += sizeof(schema.base_metadata.table_name);
+
+    // is_fixed_length_record
+    data.resize(offset + sizeof(schema.base_metadata.is_fixed_length_record));
+    std::memcpy(data.data() + offset, &schema.base_metadata.is_fixed_length_record, sizeof(schema.base_metadata.is_fixed_length_record));
+    offset += sizeof(schema.base_metadata.is_fixed_length_record);
+
+    // num_records
+    data.resize(offset + sizeof(schema.base_metadata.num_records));
+    std::memcpy(data.data() + offset, &schema.base_metadata.num_records, sizeof(schema.base_metadata.num_records));
+    offset += sizeof(schema.base_metadata.num_records);
+
+    // fixed_record_size
+    data.resize(offset + sizeof(schema.base_metadata.fixed_record_size));
+    std::memcpy(data.data() + offset, &schema.base_metadata.fixed_record_size, sizeof(schema.base_metadata.fixed_record_size));
+    offset += sizeof(schema.base_metadata.fixed_record_size);
+
+    // data_page_ids (vector): primero el tamaño, luego los elementos
+    uint32_t num_data_pages = schema.base_metadata.data_page_ids.size();
+    data.resize(offset + sizeof(num_data_pages));
+    std::memcpy(data.data() + offset, &num_data_pages, sizeof(num_data_pages));
+    offset += sizeof(num_data_pages);
+
+    for (PageId page_id : schema.base_metadata.data_page_ids) {
+        data.resize(offset + sizeof(page_id));
+        std::memcpy(data.data() + offset, &page_id, sizeof(page_id));
+        offset += sizeof(page_id);
+    }
+
+    // Serializar ColumnMetadata (vector): primero el tamaño, luego los elementos
+    uint32_t num_columns = schema.columns.size();
+    data.resize(offset + sizeof(num_columns));
+    std::memcpy(data.data() + offset, &num_columns, sizeof(num_columns));
+    offset += sizeof(num_columns);
+
+    for (const auto& col : schema.columns) {
+        // col.name
+        data.resize(offset + sizeof(col.name));
+        std::memcpy(data.data() + offset, col.name, sizeof(col.name));
+        offset += sizeof(col.name);
+
+        // col.type
+        data.resize(offset + sizeof(col.type));
+        std::memcpy(data.data() + offset, &col.type, sizeof(col.type));
+        offset += sizeof(col.type);
+
+        // col.size
+        data.resize(offset + sizeof(col.size));
+        std::memcpy(data.data() + offset, &col.size, sizeof(col.size));
+        offset += sizeof(col.size);
+    }
+
+    Record record;
+    record.data = data;
+    return record;
+}
+
+FullTableSchema CatalogManager::DeserializeTableSchema(const Record& record) const {
+    FullTableSchema schema;
+    const Byte* data_ptr = record.data.data();
+    size_t offset = 0;
+
+    // Deserializar TableMetadata
+    // table_id
+    std::memcpy(&schema.base_metadata.table_id, data_ptr + offset, sizeof(schema.base_metadata.table_id));
+    offset += sizeof(schema.base_metadata.table_id);
+
+    // table_name
+    std::memcpy(schema.base_metadata.table_name, data_ptr + offset, sizeof(schema.base_metadata.table_name));
+    offset += sizeof(schema.base_metadata.table_name);
+
+    // is_fixed_length_record
+    std::memcpy(&schema.base_metadata.is_fixed_length_record, data_ptr + offset, sizeof(schema.base_metadata.is_fixed_length_record));
+    offset += sizeof(schema.base_metadata.is_fixed_length_record);
+
+    // num_records
+    std::memcpy(&schema.base_metadata.num_records, data_ptr + offset, sizeof(schema.base_metadata.num_records));
+    offset += sizeof(schema.base_metadata.num_records);
+
+    // fixed_record_size
+    std::memcpy(&schema.base_metadata.fixed_record_size, data_ptr + offset, sizeof(schema.base_metadata.fixed_record_size));
+    offset += sizeof(schema.base_metadata.fixed_record_size);
+
+    // data_page_ids (vector): primero el tamaño, luego los elementos
+    uint32_t num_data_pages;
+    std::memcpy(&num_data_pages, data_ptr + offset, sizeof(num_data_pages));
+    offset += sizeof(num_data_pages);
+
+    schema.base_metadata.data_page_ids.clear();
+    schema.base_metadata.data_page_ids.reserve(num_data_pages);
+    for (uint32_t i = 0; i < num_data_pages; ++i) {
+        PageId page_id;
+        std::memcpy(&page_id, data_ptr + offset, sizeof(page_id));
+        offset += sizeof(page_id);
+        schema.base_metadata.data_page_ids.push_back(page_id);
+    }
+
+    // Deserializar ColumnMetadata (vector): primero el tamaño, luego los elementos
+    uint32_t num_columns;
+    std::memcpy(&num_columns, data_ptr + offset, sizeof(num_columns));
+    offset += sizeof(num_columns);
+
+    schema.columns.clear();
+    schema.columns.reserve(num_columns);
+    for (uint32_t i = 0; i < num_columns; ++i) {
+        ColumnMetadata col;
+        // col.name
+        std::memcpy(col.name, data_ptr + offset, sizeof(col.name));
+        offset += sizeof(col.name);
+
+        // col.type
+        std::memcpy(&col.type, data_ptr + offset, sizeof(col.type));
+        offset += sizeof(col.type);
+
+        // col.size
+        std::memcpy(&col.size, data_ptr + offset, sizeof(col.size));
+        offset += sizeof(col.size);
+        schema.columns.push_back(col);
+    }
+
+    return schema;
 }

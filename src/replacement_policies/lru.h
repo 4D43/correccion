@@ -40,7 +40,7 @@ public:
 private:
     // Lista doblemente enlazada para mantener el orden de acceso (LRU al principio, MRU al final).
     std::list<FrameId> lru_list_;
-    // Mapa para acceder rápidamente a la posición de un frame en la lru_list_.
+    // Mapa para un acceso rápido a los iteradores de la lista, dado un FrameId.
     std::unordered_map<FrameId, std::list<FrameId>::iterator> lru_map_;
 };
 

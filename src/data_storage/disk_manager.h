@@ -27,7 +27,7 @@ struct PhysicalAddress {
     PhysicalAddress(uint32_t p, uint32_t s, uint32_t t, uint32_t sec)
         : platter_id(p), surface_id(s), track_id(t), sector_id(sec) {}
 
-    // Sobrecarga del operador de igualdad para comparar direcciones físicas.
+    // Operador de igualdad para comparar dos direcciones físicas.
     bool operator==(const PhysicalAddress& other) const {
         return platter_id == other.platter_id &&
                surface_id == other.surface_id &&
@@ -36,35 +36,39 @@ struct PhysicalAddress {
     }
 };
 
-// --- Estructura para los Metadatos del Disco (Super-Bloque) ---
-// Esta estructura se guardará en la DISK_METADATA_PAGE (PageId 0)
-// para persistir la configuración y el estado del disco.
-struct DiskMetadata {
-    char disk_name[256];             // Nombre del disco
-    uint32_t num_platters;             // Número de platos
-    uint32_t num_surfaces_per_platter; // Superficies por plato
-    uint32_t num_cylinders;            // Número de cilindros (igual a num_tracks_per_surface)
-    uint32_t num_sectors_per_track;    // Sectores por pista
-    BlockSizeType block_size;          // Tamaño de un bloque lógico
-    SectorSizeType sector_size;        // Tamaño de un sector físico
-    uint32_t next_logical_page_id;     // Siguiente PageId lógico disponible
-    // El sector_status_map_ y logical_to_physical_map_ se serializarán/deserializarán aparte
-    // debido a su naturaleza dinámica y complejidad de estructura.
-};
+// Especialización de std::hash para PhysicalAddress, necesaria para usarla como clave en std::unordered_map
+namespace std {
+    template <>
+    struct hash<PhysicalAddress> {
+        size_t operator()(const PhysicalAddress& pa) const {
+            // Una función hash simple que combina los hashes de sus miembros.
+            // Se puede usar std::hash para cada miembro y combinarlos.
+            size_t h1 = std::hash<uint32_t>()(pa.platter_id);
+            size_t h2 = std::hash<uint32_t>()(pa.surface_id);
+            size_t h3 = std::hash<uint32_t>()(pa.track_id);
+            size_t h4 = std::hash<uint32_t>()(pa.sector_id);
+            return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3);
+        }
+    };
+}
 
 
-// Clase DiskManager: Gestiona la estructura física del disco y la asignación de bloques.
+// Clase DiskManager: Simula la gestión de un disco duro físico.
+// Responsabilidades:
+// - Asignar y desasignar bloques lógicos a direcciones físicas.
+// - Leer y escribir bloques de datos.
+// - Persistir el estado del disco (mapa de bits y mapeo lógico a físico).
 class DiskManager {
 public:
     // Constructor del DiskManager.
-    // disk_name: Nombre del disco que se va a gestionar.
+    // disk_name: Nombre del directorio donde se almacenarán los archivos del disco.
     // num_platters: Número de platos en el disco.
-    // num_surfaces_per_platter: Número de superficies por plato (ej. 2 para arriba y abajo).
-    // num_cylinders: Número de cilindros (o pistas por superficie).
+    // num_surfaces_per_platter: Número de superficies por plato (normalmente 2).
+    // num_cylinders: Número de cilindros (pistas) por superficie.
     // num_sectors_per_track: Número de sectores por pista.
-    // block_size: Tamaño de un bloque lógico en bytes.
-    // sector_size: Tamaño de un sector físico en bytes.
-    // is_new_disk: Indica si se está creando un disco nuevo o cargando uno existente.
+    // block_size: Tamaño lógico de un bloque de datos en bytes.
+    // sector_size: Tamaño físico de un sector en bytes.
+    // is_new_disk: true si se está creando un disco nuevo, false si se está cargando uno existente.
     DiskManager(const std::string& disk_name,
                 uint32_t num_platters,
                 uint32_t num_surfaces_per_platter,
@@ -72,101 +76,80 @@ public:
                 uint32_t num_sectors_per_track,
                 BlockSizeType block_size,
                 SectorSizeType sector_size,
-                bool is_new_disk = true); // Nuevo parámetro
+                bool is_new_disk);
 
-    // Crea la estructura de directorios y archivos que representan el disco físico.
-    // Esto incluye las carpetas 'body' y 'blocks', y los archivos de sectores.
-    // También inicializa la DISK_METADATA_PAGE y guarda los metadatos.
+    // Destructor: Guarda el estado del disco antes de salir.
+    ~DiskManager();
+
+    // Crea la estructura de directorios y archivos para un nuevo disco.
     Status CreateDiskStructure();
 
-    // Carga la configuración del disco y el mapa de sectores desde la DISK_METADATA_PAGE.
+    // Carga los metadatos del disco desde el archivo de metadatos.
     Status LoadDiskMetadata();
 
-    // Guarda la configuración del disco y el mapa de sectores en la DISK_METADATA_PAGE.
-    Status SaveDiskMetadata();
+    // Asigna un nuevo bloque lógico en el disco.
+    // page_type: El tipo de página que se asignará (para optimizar la ubicación).
+    // block_id: El ID del bloque lógico asignado (salida).
+    // Retorna Status::OK si la asignación es exitosa, o un error en caso contrario.
+    Status AllocateBlock(PageType page_type, BlockId& block_id);
 
-    // Lee un bloque de datos del disco físico en una dirección específica.
-    // La dirección apunta al primer sector del bloque lógico.
-    // address: La dirección física del primer sector del bloque a leer.
-    // block: Referencia al objeto Block donde se cargarán los datos.
-    Status ReadBlock(const PhysicalAddress& address, Block& block);
+    // Desasigna un bloque lógico del disco, marcando su espacio como libre.
+    // block_id: El ID del bloque lógico a desasignar.
+    Status DeallocateBlock(BlockId block_id);
 
-    // Escribe un bloque de datos en el disco físico en una dirección específica.
-    // La dirección apunta al primer sector del bloque lógico.
-    // address: La dirección física donde se escribirá el bloque.
+    // Lee un bloque de datos del disco físico.
+    // block_id: El ID del bloque lógico a leer.
+    // block: Referencia a un objeto Block donde se cargarán los datos (salida).
+    Status ReadBlock(BlockId block_id, Block& block);
+
+    // Escribe un bloque de datos al disco físico.
+    // block_id: El ID del bloque lógico a escribir.
     // block: El objeto Block que contiene los datos a escribir.
-    Status WriteBlock(const PhysicalAddress& address, const Block& block);
+    Status WriteBlock(BlockId block_id, const Block& block);
 
-    // Asigna un nuevo bloque lógico a un conjunto de sectores físicos contiguos disponibles.
-    // Retorna el PageId lógico asignado y su PhysicalAddress.
-    // page_type_hint: Sugerencia del tipo de página para optimizar la ubicación en disco.
-    // Retorna Status::DISK_FULL si no hay suficientes sectores libres contiguos.
-    Status AllocateBlock(PageId& new_page_id, PhysicalAddress& allocated_address, std::optional<PageType> page_type_hint = std::nullopt);
+    // Actualiza el estado de un bloque lógico en el mapa de bits del disco.
+    // Esto no guarda el mapa en disco inmediatamente, solo lo actualiza en memoria.
+    void UpdateBlockStatus(BlockId block_id, BlockStatus status);
 
-    // Libera un conjunto de sectores físicos que forman un bloque lógico, marcándolos como disponibles.
-    // page_id: El ID lógico del bloque a liberar.
-    Status DeallocateBlock(PageId page_id);
-
-    // Actualiza el BlockStatus de un bloque lógico en el sector_status_map_.
-    // Esto es usado por el RecordManager para indicar si una página de datos está INCOMPLETE o FULL.
-    Status UpdateBlockStatus(PageId page_id, BlockStatus new_status);
-
-    // Obtiene la dirección física de un PageId lógico.
-    // Retorna un objeto PhysicalAddress válido si el PageId existe, o un PhysicalAddress por defecto
-    // si no se encuentra (y un error de estado).
-    PhysicalAddress GetPhysicalAddress(PageId page_id) const;
-
-    // Obtiene la dirección física de la página de metadatos del disco (PageId 0).
-    PhysicalAddress GetDiskMetadataPageAddress() const;
-
-    // Obtiene el número total de sectores físicos en el disco.
-    uint32_t GetTotalPhysicalSectors() const;
-
-    // Obtiene el número de sectores físicos libres en el disco.
-    uint32_t GetFreePhysicalSectors() const;
-
-    // Obtiene el número total de bloques lógicos que el disco puede almacenar.
-    uint32_t GetTotalLogicalBlocks() const;
-
-    // Obtiene el tamaño de un bloque lógico en bytes.
-    BlockSizeType GetBlockSize() const;
-
-    // Obtiene el tamaño de un sector físico en bytes.
-    SectorSizeType GetSectorSize() const;
-
-    // Getters para los parámetros del disco
+    // Métodos getter para los parámetros del disco.
     std::string GetDiskName() const { return disk_name_; }
     uint32_t GetNumPlatters() const { return num_platters_; }
     uint32_t GetNumSurfacesPerPlatter() const { return num_surfaces_per_platter_; }
     uint32_t GetNumCylinders() const { return num_cylinders_; }
     uint32_t GetNumSectorsPerTrack() const { return num_sectors_per_track_; }
+    BlockSizeType GetBlockSize() const { return block_size_; }
+    SectorSizeType GetSectorSize() const { return sector_size_; }
+    uint32_t GetSectorsPerBlock() const { return block_size_ / sector_size_; }
+    uint32_t GetTotalPhysicalSectors() const;
+    uint32_t GetFreePhysicalSectors() const;
+    uint32_t GetTotalLogicalBlocks() const;
+    
+    // NUEVAS FUNCIONES PARA INFORMACIÓN DETALLADA DEL DISCO
+    uint64_t GetTotalCapacityBytes() const; // Capacidad total del disco en bytes
+    uint32_t GetOccupiedLogicalBlocks() const; // Número de bloques lógicos ocupados
+    double GetDiskUsagePercentage() const; // Porcentaje de uso del disco
+    
+    // Método para imprimir una representación visual del mapa de estado de bloques
+    void PrintBlockStatusMap() const;
+    // Método para imprimir una representación visual del mapeo lógico a físico
+    void PrintLogicalToPhysicalMap() const;
 
-    // Obtiene el número de sectores físicos que ocupa un bloque lógico.
-    uint32_t GetSectorsPerBlock() const {
-        return block_size_ / sector_size_;
-    }
 
 private:
-    std::string disk_name_;             // Nombre del disco
-    uint32_t num_platters_;             // Número de platos
-    uint32_t num_surfaces_per_platter_; // Superficies por plato
-    uint32_t num_cylinders_;            // Número de cilindros (igual a num_tracks_per_surface)
-    uint32_t num_sectors_per_track_;    // Sectores por pista
-    BlockSizeType block_size_;          // Tamaño de un bloque lógico
-    SectorSizeType sector_size_;        // Tamaño de un sector físico
-    uint32_t next_logical_page_id_;     // Siguiente PageId lógico disponible para asignación
+    std::string disk_name_;
+    uint32_t num_platters_;
+    uint32_t num_surfaces_per_platter_;
+    uint32_t num_cylinders_;
+    uint32_t num_sectors_per_track_;
+    BlockSizeType block_size_;
+    SectorSizeType sector_size_;
+    
+    // El próximo PageId lógico disponible para asignación.
+    // ¡AHORA RESIDE EN DISKMANAGER Y SERÁ PERSISTENTE!
+    BlockId next_logical_page_id_; 
 
-    // Ruta base donde se almacenarán los discos (ej. C:/Discos/)
-    std::filesystem::path base_disk_path_;
-    // Ruta específica para este disco (ej. C:/Discos/MiDisco/)
-    std::filesystem::path current_disk_path_;
-    // Ruta para la estructura física del disco (ej. C:/Discos/MiDisco/body/)
-    std::filesystem::path body_path_;
-    // Ruta para los archivos de bloques lógicos (ej. C:/Discos/MiDisco/blocks/)
-    std::filesystem::path blocks_path_;
-
-    // Vector de matrices para controlar el estado de los bloques (ocupado/libre/incompleto).
-    // Dimensiones: [Cilindro ID (Pista)][Índice Combinado Plato/Superficie][Sector]
+    // Mapa de bits para el estado de los sectores físicos.
+    // sector_status_map_[Cilindro][Combinado Plato/Superficie][Sector]
     // Almacena BlockStatus para el PRIMER sector de cada bloque lógico.
     std::vector<std::vector<std::vector<BlockStatus>>> sector_status_map_;
 
@@ -192,6 +175,10 @@ private:
     bool FindContiguousBlock(uint32_t start_sector, uint32_t end_sector,
                              PhysicalAddress& allocated_address, uint32_t sectors_needed,
                              bool prioritize_incomplete = false); // Nuevo parámetro
+    
+    // Métodos para persistir y cargar los metadatos internos del DiskManager.
+    Status SaveDiskMetadata();
+
 };
 
 #endif // DISK_MANAGER_H

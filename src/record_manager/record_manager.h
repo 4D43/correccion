@@ -8,6 +8,9 @@
 #include <string>                   // Para std::string
 #include <memory>                   // Para std::unique_ptr
 
+// Forward declaration para resolver dependencia circular con CatalogManager
+class CatalogManager; 
+
 // --- Cabecera General del Bloque (Common to ALL Block Types) ---
 // Esta estructura se superpondrá al inicio de CADA bloque de datos.
 // Contiene metadatos fundamentales para cualquier tipo de página.
@@ -23,62 +26,59 @@ struct BlockHeader {
 // --- Entrada del Directorio de Slots (Para DATA_PAGEs) ---
 // Cada entrada apunta a un registro dentro del bloque.
 struct SlotDirectoryEntry {
-    uint32_t offset; // Offset del registro desde el inicio del bloque
-    uint32_t length; // Longitud del registro en bytes
-    bool is_occupied; // Indica si este slot está ocupado por un registro
-
-    SlotDirectoryEntry() : offset(0), length(0), is_occupied(false) {}
+    uint32_t offset;        // Offset del registro dentro del bloque (desde el inicio del bloque)
+    uint32_t length;        // Longitud del registro en bytes
+    bool is_occupied;       // True si el slot está ocupado, false si está libre
 };
 
-// --- Estructura para representar un Registro ---
-// Esto es una abstracción para el usuario del RecordManager.
-// Un registro es simplemente un vector de bytes.
+// Estructura para representar un registro de datos.
+// Contiene los datos brutos del registro.
 struct Record {
-    std::vector<Byte> data;
+    std::vector<Byte> data; // Contenido del registro
 };
 
-// Clase RecordManager: Gestiona la organización y manipulación de registros dentro de los bloques.
-// Esta versión se centrará en DATA_PAGEs usando un Slot Directory.
+
+// Clase RecordManager: Gestiona los registros dentro de las páginas de datos.
+// Responsabilidades:
+// - Inicializar páginas de datos.
+// - Insertar, eliminar, actualizar y obtener registros.
+// - Gestionar el directorio de slots dentro de una página.
 class RecordManager {
 public:
     // Constructor del RecordManager.
-    // buffer_manager: Una referencia al BufferManager para interactuar con los bloques.
+    // buffer_manager: Referencia al BufferManager para interactuar con las páginas.
+    // catalog_manager: Referencia al CatalogManager para actualizar metadatos de tablas.
+    // NOTA: Se ha simplificado el constructor para romper la dependencia circular.
     RecordManager(BufferManager& buffer_manager);
 
-    // Inicializa una nueva página de datos (DATA_PAGE).
-    // page_id: El ID de la página a inicializar (debe haber sido obtenida con NewPage de BufferManager).
-    // Retorna Status::OK si la inicialización es exitosa.
+    // Método setter para el CatalogManager (para resolver la dependencia circular)
+    void SetCatalogManager(CatalogManager& catalog_manager);
+
+    // Inicializa una nueva página de datos con la cabecera adecuada.
+    // page_id: El ID de la página a inicializar.
     Status InitDataPage(PageId page_id);
 
-    // Inserta un nuevo registro en una página de datos.
-    // page_id: El ID de la página donde se intentará insertar el registro.
-    // record_data: Los datos del registro a insertar.
-    // slot_id: El ID del slot donde se insertó el registro (salida).
-    // Retorna Status::OK si la inserción es exitosa, Status::BUFFER_FULL (si el bloque está lleno)
-    // o Status::ERROR en caso de otros fallos.
-    Status InsertRecord(PageId page_id, const Record& record_data, uint32_t& slot_id);
+    // Inserta un registro en una página de datos.
+    // page_id: El ID de la página donde insertar.
+    // record: El registro a insertar.
+    // slot_id: El ID del slot asignado al nuevo registro (salida).
+    Status InsertRecord(PageId page_id, const Record& record, uint32_t& slot_id);
 
     // Obtiene un registro de una página de datos.
-    // page_id: El ID de la página.
-    // slot_id: El ID del slot del registro a obtener.
-    // record_data: El objeto Record donde se copiarán los datos (salida).
-    // Retorna Status::OK si la obtención es exitosa, Status::NOT_FOUND si el slot está vacío,
-    // o Status::ERROR en caso de otros fallos.
-    Status GetRecord(PageId page_id, uint32_t slot_id, Record& record_data);
+    // page_id: El ID de la página de donde obtener el registro.
+    // slot_id: El ID del slot del registro.
+    // record: El registro obtenido (salida).
+    Status GetRecord(PageId page_id, uint32_t slot_id, Record& record);
 
     // Actualiza un registro existente en una página de datos.
-    // page_id: El ID de la página.
+    // page_id: El ID de la página donde actualizar.
     // slot_id: El ID del slot del registro a actualizar.
-    // new_record_data: Los nuevos datos del registro.
-    // Retorna Status::OK si la actualización es exitosa, Status::NOT_FOUND si el slot está vacío,
-    // o Status::ERROR en caso de otros fallos.
-    Status UpdateRecord(PageId page_id, uint32_t slot_id, const Record& new_record_data);
+    // new_record: El nuevo contenido del registro.
+    Status UpdateRecord(PageId page_id, uint32_t slot_id, const Record& new_record);
 
     // Elimina un registro de una página de datos.
-    // page_id: El ID de la página.
+    // page_id: El ID de la página de donde eliminar el registro.
     // slot_id: El ID del slot del registro a eliminar.
-    // Retorna Status::OK si la eliminación es exitosa, Status::NOT_FOUND si el slot está vacío,
-    // o Status::ERROR en caso de otros fallos.
     Status DeleteRecord(PageId page_id, uint32_t slot_id);
 
     // Obtiene el número de registros en una página.
@@ -87,21 +87,13 @@ public:
     // Obtiene el espacio libre restante en una página.
     Status GetFreeSpace(PageId page_id, BlockSizeType& free_space);
 
-    BlockSizeType GetSlotDirectoryStartOffset() const; // Ahora es fijo después de la cabecera base
+    // Calcula el offset donde comienza el directorio de slots.
+    BlockSizeType GetSlotDirectoryStartOffset() const; 
 
     // Métodos auxiliares para leer/escribir la cabecera general del bloque
     // page_data: Puntero a los datos del bloque en memoria.
     BlockHeader ReadBlockHeader(Byte* page_data) const;
-
     void WriteBlockHeader(Byte* page_data, const BlockHeader& header) const;
-
-
-private:
-    BufferManager& buffer_manager_; // Referencia al gestor de búfer
-
-    // Tamaño de la cabecera general fija (sin contar el slot directory variable).
-    BlockSizeType fixed_header_base_size_;
-    
 
     // Métodos auxiliares para manipular el directorio de slots
     // page_data: Puntero a los datos del bloque en memoria.
@@ -109,10 +101,12 @@ private:
     SlotDirectoryEntry ReadSlotEntry(Byte* page_data, uint32_t slot_id) const;
     void WriteSlotEntry(Byte* page_data, uint32_t slot_id, const SlotDirectoryEntry& entry) const;
 
-    // Calcula el offset donde comienza el directorio de slots.
-    // El directorio de slots crece desde el final de la cabecera fija hacia el final del bloque.
-    // Calcula el espacio libre real en una página.
-    BlockSizeType CalculateFreeSpace(Byte* page_data) const;
+private:
+    BufferManager& buffer_manager_; // Referencia al gestor de búfer
+    CatalogManager* catalog_manager_; // Puntero al gestor de catálogo (para romper la dependencia circular)
+
+    // Tamaño de la cabecera general fija (sin contar el slot directory variable).
+    BlockSizeType fixed_header_base_size_;
 };
 
 #endif // RECORD_MANAGER_H

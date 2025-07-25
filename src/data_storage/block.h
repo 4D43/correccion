@@ -3,6 +3,9 @@
 #define BLOCK_H
 
 #include "../include/common.h" // Incluye Byte, BlockSizeType, SectorSizeType
+#include <vector> // Para std::vector
+#include <stdexcept> // Para std::out_of_range
+#include <algorithm> // Para std::copy, std::fill
 
 // Clase que representa un bloque de datos.
 // Un bloque es la unidad fundamental de E/S entre la memoria y el disco.
@@ -20,7 +23,7 @@ public:
 
     // Constructor que permite inicializar el bloque con datos externos.
     // data_ptr: Puntero a los datos de origen.
-    // size: Cantidad de bytes a copiar.
+    // data_size: Cantidad de bytes a copiar.
     // block_size: El tamaño total del bloque.
     Block(const Byte* data_ptr, BlockSizeType data_size, BlockSizeType block_size) : size_(block_size) {
         if (data_size > size_) {
@@ -59,8 +62,8 @@ public:
     }
 
 private:
-    std::vector<Byte> data_; // Vector de bytes que almacena el contenido real del bloque.
-    BlockSizeType size_;     // Tamaño actual de este bloque.
+    BlockSizeType size_;      // Tamaño del bloque en bytes
+    std::vector<Byte> data_;  // Contenedor para los datos del bloque
 };
 
 #endif // BLOCK_H

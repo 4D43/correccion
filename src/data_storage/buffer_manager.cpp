@@ -3,6 +3,7 @@
 #include "block.h" // Para usar la clase Block para E/S con DiskManager
 #include <cstring> // Para std::memcpy
 #include <iostream> // Para std::cout, std::cerr
+#include <algorithm> // Para std::fill
 
 // Constructor del BufferManager.
 BufferManager::BufferManager(DiskManager& disk_manager,
@@ -21,192 +22,177 @@ BufferManager::BufferManager(DiskManager& disk_manager,
 
     // Inicializar el vector de metadatos de frames del Buffer Pool.
     frames_.resize(pool_size_);
-
-    // Inicializar el "vector de arreglos estáticos" que simula todo el disco en RAM.
-    // Su tamaño es el número total de bloques lógicos en el disco.
-    buffer_data_simulated_disk_.resize(disk_manager_.GetTotalLogicalBlocks());
-    // Redimensionar cada bloque simulado al tamaño correcto.
-    for (auto& block_data : buffer_data_simulated_disk_) {
-        block_data.resize(block_size_, 0); // Cada vector<Byte> se redimensiona a block_size_
-    }
-
-    // Notificar a la política de reemplazo sobre los frames disponibles.
     for (FrameId i = 0; i < pool_size_; ++i) {
-        replacement_policy_->AddFrame(i);
+        frames_[i].Reset(); // Inicializar cada frame como no válido
+        replacement_policy_->AddFrame(i); // Notificar a la política de reemplazo de los nuevos frames
     }
 
-    std::cout << "BufferManager inicializado con pool_size: " << pool_size_ << std::endl;
-    std::cout << "Tamaño de bloque lógico en BufferManager: " << block_size_ << " bytes." << std::endl;
-    std::cout << "Tamaño del buffer de disco simulado (total bloques): " << buffer_data_simulated_disk_.size() << " bloques." << std::endl;
+    // Inicializar el Buffer Pool de datos. Cada frame es un vector de Byte.
+    buffer_data_pool_.resize(pool_size_);
+    for (auto& frame_data : buffer_data_pool_) {
+        frame_data.resize(block_size_, 0); // Redimensionar cada frame al tamaño del bloque e inicializar con ceros
+    }
+
+    std::cout << "BufferManager inicializado con pool_size=" << pool_size_
+              << " y block_size=" << block_size_ << " bytes." << std::endl;
 }
 
-// Destructor del BufferManager.
-// Asegura que todas las páginas sucias sean escritas de vuelta al disco.
+// Destructor: Asegura que todas las páginas sucias sean escritas a disco.
 BufferManager::~BufferManager() {
-    std::cout << "Destructor del BufferManager: FlushAllPages..." << std::endl;
-    FlushAllPages(); // Asegura que los datos modificados se persistan.
-    std::cout << "BufferManager destruido." << std::endl;
+    std::cout << "BufferManager: Flushando todas las páginas sucias antes de la destrucción." << std::endl;
+    Status status = FlushAllPages();
+    if (status != Status::OK) {
+        std::cerr << "Error (Destructor BufferManager): Fallo al flushar todas las páginas sucias: " << StatusToString(status) << std::endl;
+    }
 }
 
-// Método auxiliar para encontrar un frame libre en el buffer pool.
-FrameId BufferManager::FindFreeFrame() {
-    for (FrameId i = 0; i < pool_size_; ++i) {
-        if (!frames_[i].is_valid) { // Si el frame no contiene datos válidos, está libre.
-            return i;
-        }
-    }
-    return (FrameId)-1; // No hay frames libres disponibles.
-}
-
-// Método auxiliar para escribir una página (datos de buffer_data_simulated_disk_)
-// de vuelta al disco físico (usando DiskManager).
-Status BufferManager::WritePageToDisk(PageId page_id) {
-    // Obtener la dirección física del DiskManager
-    PhysicalAddress physical_address = disk_manager_.GetPhysicalAddress(page_id);
-    // Si GetPhysicalAddress imprime un error, ya se maneja allí.
-    if (physical_address.platter_id == 0 && physical_address.surface_id == 0 &&
-        physical_address.track_id == 0 && physical_address.sector_id == 0 && page_id != 0) {
-        // Esto es una heurística simple para detectar una dirección inválida si no es PageId 0
-        // (asumiendo que PageId 0 siempre es (0,0,0,0) y es válido).
-        return Status::NOT_FOUND; // O un estado más específico como INVALID_BLOCK_ID
-    }
-
-    // Crear un Block temporal con el tamaño correcto y copiar los datos.
-    Block temp_block(buffer_data_simulated_disk_[page_id].data(), block_size_, block_size_);
-
-    std::cout << "Escribiendo PageId " << page_id << " (física: P" << physical_address.platter_id
-              << " S" << physical_address.surface_id << " T" << physical_address.track_id
-              << " Sec" << physical_address.sector_id << ") al disco..." << std::endl;
-
-    Status write_status = disk_manager_.WriteBlock(physical_address, temp_block);
-    if (write_status != Status::OK) {
-        std::cerr << "Error (WritePageToDisk): Fallo al escribir PageId " << page_id << " al disco." << std::endl;
-        return write_status;
-    }
-    return Status::OK;
-}
-
-// Método auxiliar para leer una página (datos del disco físico)
-// y cargarla en buffer_data_simulated_disk_.
-Status BufferManager::ReadPageFromDisk(PageId page_id) {
-    // Obtener la dirección física del DiskManager
-    PhysicalAddress physical_address = disk_manager_.GetPhysicalAddress(page_id);
-    // Si GetPhysicalAddress imprime un error, ya se maneja allí.
-    if (physical_address.platter_id == 0 && physical_address.surface_id == 0 &&
-        physical_address.track_id == 0 && physical_address.sector_id == 0 && page_id != 0) {
-        return Status::NOT_FOUND;
-    }
-
-    // Crear un Block temporal del tamaño correcto para leer los datos del DiskManager.
-    Block temp_block(block_size_);
-    std::cout << "Leyendo PageId " << page_id << " (física: P" << physical_address.platter_id
-              << " S" << physical_address.surface_id << " T" << physical_address.track_id
-              << " Sec" << physical_address.sector_id << ") desde disco..." << std::endl;
-
-    Status read_status = disk_manager_.ReadBlock(physical_address, temp_block);
-    if (read_status != Status::OK) {
-        std::cerr << "Error (ReadPageFromDisk): Fallo al leer PageId " << page_id << " desde disco." << std::endl;
-        return read_status;
-    }
-
-    // Copiar los datos leídos del Block temporal a la posición de page_id en buffer_data_simulated_disk_.
-    std::memcpy(buffer_data_simulated_disk_[page_id].data(), temp_block.GetData(), block_size_);
-    return Status::OK;
-}
-
-// Método auxiliar para desalojar una página del buffer pool.
-Status BufferManager::EvictPage() {
-    FrameId frame_to_evict = replacement_policy_->Evict();
-
-    if (frame_to_evict == (FrameId)-1) { // Asumiendo -1 como "no se puede desalojar"
-        std::cerr << "Error (EvictPage): No hay páginas desalojables disponibles en el buffer pool." << std::endl;
-        return Status::BUFFER_FULL; // O PAGE_PINNED si todas están ancladas
-    }
-
-    Page& page_info = frames_[frame_to_evict];
-
-    if (page_info.pin_count > 0) {
-        std::cerr << "Error (EvictPage): Intentando desalojar una página anclada (pinned): " << page_info.page_id << std::endl;
-        return Status::PAGE_PINNED;
-    }
-
-    // Si la página está sucia, escribirla de vuelta al disco.
-    if (page_info.is_dirty) {
-        Status write_status = WritePageToDisk(page_info.page_id);
-        if (write_status != Status::OK) {
-            std::cerr << "Error (EvictPage): Fallo al escribir la página sucia " << page_info.page_id << " al disco." << std::endl;
-            return write_status;
-        }
-    }
-
-    // Remover la página de la tabla de páginas y resetear el frame.
-    page_table_.erase(page_info.page_id);
-    replacement_policy_->RemoveFrame(frame_to_evict); // Notificar a la política
-    frames_[frame_to_evict].Reset(); // Limpiar metadatos del frame
-
-    std::cout << "Página desalojada del frame " << frame_to_evict << " (PageId " << page_info.page_id << ")." << std::endl;
-    return Status::OK;
-}
-
-// Solicita una página (bloque) del buffer pool.
-Byte* BufferManager::FetchPage(PageId page_id) {
-    // Validar que el page_id esté dentro del rango del disco simulado
-    if (page_id >= disk_manager_.GetTotalLogicalBlocks()) { // Usar total logical blocks del disk manager
-        std::cerr << "Error (FetchPage): PageId " << page_id << " fuera de rango para el disco simulado." << std::endl;
-        return nullptr;
-    }
-
+// Obtiene una página del buffer pool. Si no está, la carga del disco.
+Byte* BufferManager::FetchPage(PageId page_id) { // Corregido: Tipo de retorno a Byte*
     // 1. Verificar si la página ya está en el buffer pool.
     auto it = page_table_.find(page_id);
     if (it != page_table_.end()) {
         FrameId frame_id = it->second;
         frames_[frame_id].pin_count++; // Incrementar pin_count
-        replacement_policy_->Pin(frame_id); // Notificar a la política que está anclada
-        replacement_policy_->Access(frame_id); // Notificar acceso
-        std::cout << "Página " << page_id << " ya en buffer (frame " << frame_id << "). Pin count: " << frames_[frame_id].pin_count << std::endl;
-        return buffer_data_simulated_disk_[page_id].data(); // Retornar puntero a los datos del bloque lógico
+        replacement_policy_->Access(frame_id); // Notificar acceso a la política
+        // std::cout << "FetchPage: Página " << page_id << " encontrada en frame " << frame_id << ". Pin count: " << frames_[frame_id].pin_count << std::endl;
+        return &buffer_data_pool_[frame_id][0]; // Retornar puntero a los datos
     }
 
-    // 2. La página no está en el buffer, intentar encontrar un frame libre o desalojar uno.
-    FrameId frame_id = FindFreeFrame();
-    if (frame_id == (FrameId)-1) { // No hay frames libres, intentar desalojar.
-        std::cout << "Buffer lleno. Intentando desalojar una página..." << std::endl;
+    // 2. La página no está en el buffer. Buscar un frame libre o desalojar uno.
+    FrameId target_frame_id = FindFreeFrame();
+    if (target_frame_id == (FrameId)-1) { // No hay frames libres, intentar desalojar
         Status evict_status = EvictPage();
         if (evict_status != Status::OK) {
-            std::cerr << "Error (FetchPage): No se pudo desalojar una página para cargar " << page_id << std::endl;
-            return nullptr; // No se pudo obtener un frame
+            std::cerr << "Error (FetchPage): No se pudo desalojar una página para cargar la página " << page_id << "." << std::endl;
+            return nullptr;
         }
-        // Después de desalojar, FindFreeFrame debería encontrar el frame recién liberado.
-        frame_id = FindFreeFrame();
-        if (frame_id == (FrameId)-1) { // Esto no debería pasar si EvictPage fue OK
-            std::cerr << "Error (FetchPage): EvictPage exitoso pero no se encontró frame libre." << std::endl;
+        // Después de desalojar, FindFreeFrame debería encontrar un frame libre (el que fue desalojado)
+        target_frame_id = FindFreeFrame();
+        if (target_frame_id == (FrameId)-1) { // Esto no debería pasar si EvictPage fue exitoso
+            std::cerr << "Error (FetchPage): Después de desalojar, no se encontró un frame libre." << std::endl;
             return nullptr;
         }
     }
 
-    // 3. Cargar la página desde el disco al buffer_data_simulated_disk_ en la posición de page_id.
-    Status read_status = ReadPageFromDisk(page_id);
+    // 3. Cargar la página del disco al frame encontrado/desalojado.
+    Status read_status = ReadPageFromDisk(page_id, target_frame_id);
     if (read_status != Status::OK) {
-        std::cerr << "Error (FetchPage): Fallo al leer PageId " << page_id << " desde disco." << std::endl;
+        std::cerr << "Error (FetchPage): Fallo al leer la página " << page_id << " del disco. " << StatusToString(read_status) << std::endl;
+        // El frame queda en estado inválido o se resetea
+        frames_[target_frame_id].Reset();
+        replacement_policy_->RemoveFrame(target_frame_id); // Remover de la política si la carga falla
         return nullptr;
     }
 
-    // Actualizar metadatos del frame y tabla de páginas.
-    frames_[frame_id].page_id = page_id;
-    frames_[frame_id].pin_count = 1; // Anclada al cargar
-    frames_[frame_id].is_dirty = false; // Recién cargada, no sucia
-    frames_[frame_id].is_valid = true;  // Contiene datos válidos
+    // 4. Actualizar metadatos del frame y page_table_.
+    frames_[target_frame_id].page_id = page_id;
+    frames_[target_frame_id].pin_count = 1; // Anclada por el fetch
+    frames_[target_frame_id].is_dirty = false; // Recién cargada, no sucia
+    frames_[target_frame_id].is_valid = true;
+    page_table_[page_id] = target_frame_id; // Añadir al mapa
 
-    page_table_[page_id] = frame_id; // Añadir al mapa de PageId a FrameId
+    replacement_policy_->Pin(target_frame_id); // Notificar a la política que la página está anclada
+    replacement_policy_->Access(target_frame_id); // Notificar acceso
 
-    replacement_policy_->Pin(frame_id); // Notificar a la política que está anclada
-    replacement_policy_->Access(frame_id); // Notificar acceso
-
-    std::cout << "Página " << page_id << " cargada en frame " << frame_id << ". Pin count: " << frames_[frame_id].pin_count << std::endl;
-    return buffer_data_simulated_disk_[page_id].data(); // Retornar puntero a los datos del bloque lógico
+    // std::cout << "FetchPage: Página " << page_id << " cargada en frame " << target_frame_id << ". Pin count: " << frames_[target_frame_id].pin_count << std::endl;
+    return &buffer_data_pool_[target_frame_id][0]; // Retornar puntero a los datos
 }
 
-// Desancla una página del buffer pool.
+// Crea una nueva página en el disco y la carga en el buffer pool.
+Byte* BufferManager::NewPage(PageId& new_page_id, PageType page_type) {
+    // 1. Asignar un nuevo bloque en el disco.
+    Status allocate_status = disk_manager_.AllocateBlock(page_type, new_page_id);
+    if (allocate_status != Status::OK) {
+        std::cerr << "Error (NewPage): Fallo al asignar un nuevo bloque en el DiskManager. " << StatusToString(allocate_status) << std::endl;
+        return nullptr;
+    }
+
+    // 2. Buscar un frame libre o desalojar uno.
+    FrameId target_frame_id = FindFreeFrame();
+    if (target_frame_id == (FrameId)-1) { // No hay frames libres, intentar desalojar
+        Status evict_status = EvictPage();
+        if (evict_status != Status::OK) {
+            std::cerr << "Error (NewPage): No se pudo desalojar una página para la nueva página " << new_page_id << "." << std::endl;
+            // Si no se puede desalojar, desasignar el bloque recién asignado en el disco.
+            disk_manager_.DeallocateBlock(new_page_id);
+            return nullptr;
+        }
+        target_frame_id = FindFreeFrame(); // Obtener el frame liberado
+        if (target_frame_id == (FrameId)-1) {
+            std::cerr << "Error (NewPage): Después de desalojar, no se encontró un frame libre para la nueva página." << std::endl;
+            disk_manager_.DeallocateBlock(new_page_id);
+            return nullptr;
+        }
+    }
+
+    // 3. Inicializar el frame en memoria con ceros (representa una página vacía).
+    std::fill(buffer_data_pool_[target_frame_id].begin(), buffer_data_pool_[target_frame_id].end(), 0);
+
+    // 4. Actualizar metadatos del frame y page_table_.
+    frames_[target_frame_id].page_id = new_page_id;
+    frames_[target_frame_id].pin_count = 1; // Anclada por el NewPage
+    frames_[target_frame_id].is_dirty = true; // Nueva página, se considera sucia para ser escrita a disco
+    frames_[target_frame_id].is_valid = true;
+    page_table_[new_page_id] = target_frame_id; // Añadir al mapa
+
+    replacement_policy_->Pin(target_frame_id); // Notificar a la política que la página está anclada
+    replacement_policy_->Access(target_frame_id); // Notificar acceso
+
+    // Escribir la página recién creada (vacía) al disco para persistencia inicial.
+    // Esto asegura que el bloque exista físicamente en el disco.
+    Block new_block(&buffer_data_pool_[target_frame_id][0], block_size_, block_size_);
+    Status write_status = disk_manager_.WriteBlock(new_page_id, new_block);
+    if (write_status != Status::OK) {
+        std::cerr << "Error (NewPage): Fallo al escribir la nueva página " << new_page_id << " al disco. " << StatusToString(write_status) << std::endl;
+        // Intentar revertir: desanclar, eliminar del page_table, desasignar del disco.
+        UnpinPage(new_page_id, false); // Desanclar sin marcar sucia
+        page_table_.erase(new_page_id);
+        frames_[target_frame_id].Reset();
+        replacement_policy_->RemoveFrame(target_frame_id);
+        disk_manager_.DeallocateBlock(new_page_id);
+        return nullptr;
+    }
+
+    std::cout << "Nueva página " << new_page_id << " creada y cargada en frame " << target_frame_id << "." << std::endl;
+    return &buffer_data_pool_[target_frame_id][0]; // Retornar puntero a los datos
+}
+
+// Elimina una página del disco y del buffer pool (si está presente).
+Status BufferManager::DeletePage(PageId page_id) {
+    // 1. Verificar si la página está en el buffer pool.
+    auto it = page_table_.find(page_id);
+    if (it != page_table_.end()) {
+        FrameId frame_id = it->second;
+        if (frames_[frame_id].pin_count > 0) {
+            std::cerr << "Error (DeletePage): La página " << page_id << " está anclada (pin_count > 0) y no puede ser eliminada del buffer." << std::endl;
+            return Status::PAGE_PINNED;
+        }
+        // Si está en el buffer y no anclada, removerla.
+        if (frames_[frame_id].is_dirty) {
+            Status write_status = WritePageToDisk(page_id); // Flush antes de eliminar
+            if (write_status != Status::OK) {
+                std::cerr << "Error (DeletePage): Fallo al flushar la página sucia " << page_id << " antes de eliminarla. " << StatusToString(write_status) << std::endl;
+                return write_status;
+            }
+        }
+        frames_[frame_id].Reset(); // Resetear metadatos del frame
+        page_table_.erase(it); // Eliminar del mapa
+        replacement_policy_->RemoveFrame(frame_id); // Notificar a la política
+        std::cout << "Página " << page_id << " eliminada del buffer pool." << std::endl;
+    }
+
+    // 2. Desasignar el bloque del disco.
+    Status deallocate_status = disk_manager_.DeallocateBlock(page_id);
+    if (deallocate_status != Status::OK) {
+        std::cerr << "Error (DeletePage): Fallo al desasignar el bloque " << page_id << " del DiskManager. " << StatusToString(deallocate_status) << std::endl;
+        return deallocate_status;
+    }
+
+    std::cout << "Página " << page_id << " eliminada exitosamente del disco y del buffer pool (si estaba presente)." << std::endl;
+    return Status::OK;
+}
+
+// Desancla una página, decrementando su pin_count.
 Status BufferManager::UnpinPage(PageId page_id, bool is_dirty) {
     auto it = page_table_.find(page_id);
     if (it == page_table_.end()) {
@@ -215,172 +201,40 @@ Status BufferManager::UnpinPage(PageId page_id, bool is_dirty) {
     }
 
     FrameId frame_id = it->second;
-    Page& page_info = frames_[frame_id];
-
-    if (page_info.pin_count <= 0) {
-        std::cerr << "Advertencia (UnpinPage): Intentando desanclar una página ya desanclada o con pin_count <= 0: " << page_id << std::endl;
-        return Status::ERROR; // O un estado más específico como ALREADY_UNPINNED
+    if (frames_[frame_id].pin_count == 0) {
+        std::cerr << "Advertencia (UnpinPage): Página " << page_id << " ya tiene pin_count 0. No se puede desanclar más." << std::endl;
+        return Status::INVALID_PARAMETER; // O simplemente OK si no es un error crítico
     }
 
-    page_info.pin_count--; // Decrementar pin_count
+    frames_[frame_id].pin_count--;
     if (is_dirty) {
-        page_info.is_dirty = true; // Marcar como sucia si se indica
+        frames_[frame_id].is_dirty = true;
     }
 
-    replacement_policy_->Unpin(frame_id); // Notificar a la política que está desanclada
+    // Notificar a la política de reemplazo si el pin_count llega a 0
+    if (frames_[frame_id].pin_count == 0) {
+        replacement_policy_->Unpin(frame_id);
+    }
 
-    std::cout << "Página " << page_id << " desanclada (frame " << frame_id << "). Pin count: " << page_info.pin_count << ". Dirty: " << page_info.is_dirty << std::endl;
+    // std::cout << "UnpinPage: Página " << page_id << " en frame " << frame_id << ". Pin count: " << frames_[frame_id].pin_count << ". Dirty: " << (frames_[frame_id].is_dirty ? "Yes" : "No") << std::endl;
     return Status::OK;
 }
 
-// Fuerza la escritura de una página específica de vuelta al disco, si está sucia.
-Status BufferManager::FlushPage(PageId page_id) {
-    auto it_page_table = page_table_.find(page_id);
-    if (it_page_table == page_table_.end()) {
-        std::cout << "Página " << page_id << " no está en el buffer pool, no se puede flushar." << std::endl;
-        return Status::NOT_FOUND;
-    }
-
-    FrameId frame_id = it_page_table->second;
-    Page& page_info = frames_[frame_id];
-
-    if (!page_info.is_dirty) {
-        std::cout << "Página " << page_id << " (frame " << frame_id << ") no está sucia, no se necesita flush." << std::endl;
-        return Status::OK;
-    }
-
-    Status write_status = WritePageToDisk(page_id);
-    if (write_status == Status::OK) {
-        page_info.is_dirty = false; // Marcar como no sucia después de escribir
-        std::cout << "Página " << page_id << " (frame " << frame_id << ") flusheada exitosamente." << std::endl;
-    } else {
-        std::cerr << "Error (FlushPage): Fallo al flushar la página " << page_id << " (frame " << frame_id << ")." << std::endl;
-    }
-    return write_status;
-}
-
-// Fuerza la escritura de TODAS las páginas sucias de vuelta al disco.
+// Escribe todas las páginas marcadas como sucias del buffer pool al disco.
 Status BufferManager::FlushAllPages() {
     Status overall_status = Status::OK;
     for (FrameId i = 0; i < pool_size_; ++i) {
         if (frames_[i].is_valid && frames_[i].is_dirty) {
-            PageId page_id = frames_[i].page_id;
-            Status status = WritePageToDisk(page_id);
-            if (status != Status::OK) {
-                overall_status = status; // Registrar el primer error, pero intentar flush de todas.
-                std::cerr << "Error (FlushAllPages): Fallo al escribir la página " << page_id << " al disco." << std::endl;
+            Status write_status = WritePageToDisk(frames_[i].page_id);
+            if (write_status != Status::OK) {
+                std::cerr << "Error (FlushAllPages): Fallo al flushar la página " << frames_[i].page_id << ". " << StatusToString(write_status) << std::endl;
+                overall_status = write_status; // Registrar el primer error, pero continuar
             } else {
-                frames_[i].is_dirty = false; // Marcar como no sucia
+                frames_[i].is_dirty = false; // Limpiar el flag dirty si la escritura fue exitosa
             }
         }
     }
     return overall_status;
-}
-
-// Crea una nueva página (bloque) en el disco y la carga en el buffer pool.
-Byte* BufferManager::NewPage(PageId& new_page_id, PageType page_type) {
-    // 1. Asignar un nuevo bloque en el disco físico, con sugerencia de tipo.
-    PhysicalAddress allocated_address;
-    Status allocate_status = disk_manager_.AllocateBlock(new_page_id, allocated_address, page_type);
-    if (allocate_status != Status::OK) {
-        std::cerr << "Error (NewPage): No se pudo asignar un nuevo bloque en el disco." << std::endl;
-        return nullptr;
-    }
-
-    // Asegurarse de que el new_page_id no exceda el tamaño de buffer_data_simulated_disk_
-    if (new_page_id >= buffer_data_simulated_disk_.size()) {
-        std::cerr << "Error (NewPage): El PageId generado " << new_page_id << " excede el tamaño del buffer de disco simulado (" << buffer_data_simulated_disk_.size() << ")." << std::endl;
-        // No llamamos a disk_manager_.DeallocateBlock aquí, ya que AllocateBlock ya lo hizo si falló.
-        // Pero si el error es por nuestro buffer_data_simulated_disk_ ser demasiado pequeño,
-        // necesitamos desasignar del disco.
-        disk_manager_.DeallocateBlock(new_page_id); // Desasignar el bloque recién asignado
-        return nullptr;
-    }
-
-    // 2. Intentar encontrar un frame libre en el buffer pool o desalojar uno.
-    FrameId frame_id = FindFreeFrame();
-    if (frame_id == (FrameId)-1) {
-        std::cout << "Buffer lleno. Intentando desalojar una página para nueva página..." << std::endl;
-        Status evict_status = EvictPage();
-        if (evict_status != Status::OK) {
-            std::cerr << "Error (NewPage): No se pudo desalojar una página para la nueva página " << new_page_id << std::endl;
-            disk_manager_.DeallocateBlock(new_page_id); // Revertir asignación de disco
-            return nullptr;
-        }
-        frame_id = FindFreeFrame(); // Debería encontrar el frame recién liberado
-        if (frame_id == (FrameId)-1) {
-            std::cerr << "Error (NewPage): EvictPage exitoso pero no se encontró frame libre." << std::endl;
-            disk_manager_.DeallocateBlock(new_page_id);
-            return nullptr;
-        }
-    }
-
-    // 3. Inicializar el contenido del nuevo bloque en buffer_data_simulated_disk_.
-    std::fill(buffer_data_simulated_disk_[new_page_id].begin(), buffer_data_simulated_disk_[new_page_id].end(), 0); // Llenar con ceros
-
-    // 4. Actualizar metadatos del frame y tabla de páginas.
-    frames_[frame_id].page_id = new_page_id;
-    frames_[frame_id].pin_count = 1; // Anclada al crear
-    frames_[frame_id].is_dirty = true; // Es nueva, debe ser escrita al disco
-    frames_[frame_id].is_valid = true;  // Contiene datos válidos
-
-    page_table_[new_page_id] = frame_id; // Añadir al mapa de PageId a FrameId
-
-    replacement_policy_->Pin(frame_id); // Notificar a la política que está anclada
-    replacement_policy_->Access(frame_id); // Notificar acceso
-
-    std::cout << "Nueva página " << new_page_id << " (" << PageTypeToString(page_type)
-              << ") creada en disco (física: P" << allocated_address.platter_id
-              << " S" << allocated_address.surface_id << " T" << allocated_address.track_id
-              << " Sec" << allocated_address.sector_id << ") y cargada en frame " << frame_id << "." << std::endl;
-    return buffer_data_simulated_disk_[new_page_id].data();
-}
-
-// Elimina una página (bloque) del disco y del buffer pool si está presente.
-Status BufferManager::DeletePage(PageId page_id) {
-    // No permitir eliminar la DISK_METADATA_PAGE (PageId 0)
-    if (page_id == 0) {
-        std::cerr << "Error (DeletePage): No se puede eliminar la DISK_METADATA_PAGE (PageId 0)." << std::endl;
-        return Status::INVALID_PARAMETER;
-    }
-
-    auto it_page_table = page_table_.find(page_id);
-    if (it_page_table != page_table_.end()) {
-        FrameId frame_id = it_page_table->second;
-        Page& page_info = frames_[frame_id];
-
-        if (page_info.pin_count > 0) {
-            std::cerr << "Error (DeletePage): No se puede eliminar la página " << page_id << " porque está anclada (pin_count: " << page_info.pin_count << ")." << std::endl;
-            return Status::PAGE_PINNED;
-        }
-
-        // Si está sucia, forzar la escritura antes de eliminarla del disco.
-        if (page_info.is_dirty) {
-            Status flush_status = WritePageToDisk(page_id);
-            if (flush_status != Status::OK) {
-                std::cerr << "Error (DeletePage): Fallo al flushar la página sucia " << page_id << " antes de eliminarla." << std::endl;
-                return flush_status;
-            }
-        }
-
-        // Remover del mapa del buffer y notificar a la política
-        page_table_.erase(page_id);
-        replacement_policy_->RemoveFrame(frame_id);
-        frames_[frame_id].Reset(); // Limpiar metadatos del frame
-        std::cout << "Página " << page_id << " removida del buffer pool (frame " << frame_id << ")." << std::endl;
-    } else {
-        std::cout << "Página " << page_id << " no encontrada en el buffer pool. Solo se eliminará del disco." << std::endl;
-    }
-
-    // Desasignar el bloque del disco físico a través del DiskManager.
-    Status deallocate_status = disk_manager_.DeallocateBlock(page_id);
-    if (deallocate_status != Status::OK) {
-        std::cerr << "Error (DeletePage): Fallo al desasignar el bloque " << page_id << " del disco." << std::endl;
-        return deallocate_status;
-    }
-
-    std::cout << "Página " << page_id << " eliminada exitosamente del disco y del buffer pool (si estaba presente)." << std::endl;
-    return Status::OK;
 }
 
 // Obtiene el número de páginas libres (frames vacíos) en el buffer pool.
@@ -406,14 +260,103 @@ uint32_t BufferManager::GetNumBufferedPages() const {
 
 // Obtiene un puntero a los datos de un bloque lógico específico en la simulación de disco en RAM.
 const Byte* BufferManager::GetSimulatedBlockData(PageId page_id) const {
-    if (page_id >= buffer_data_simulated_disk_.size()) {
-        std::cerr << "Error (GetSimulatedBlockData): PageId " << page_id << " fuera de rango para el disco simulado." << std::endl;
-        return nullptr;
+    // Este método es un remanente si se usara un disco simulado en RAM directamente en BufferManager.
+    // Con DiskManager, la E/S se hace a través de ReadBlock/WriteBlock.
+    // Para obtener datos de una página en el buffer pool, se debe usar GetPageDataInPool.
+    // Si la página no está en el buffer, este método no la cargará.
+    auto it = page_table_.find(page_id);
+    if (it != page_table_.end()) {
+        return &buffer_data_pool_[it->second][0];
     }
-    return buffer_data_simulated_disk_[page_id].data();
+    std::cerr << "Error (GetSimulatedBlockData): Página " << page_id << " no está en el buffer pool." << std::endl;
+    return nullptr;
 }
 
-// Método delegado para actualizar el estado de un bloque en el disco.
-Status BufferManager::UpdateBlockStatusOnDisk(PageId page_id, BlockStatus new_status) {
-    return disk_manager_.UpdateBlockStatus(page_id, new_status);
+// Obtiene un puntero a los datos de una página que ya está en el buffer pool.
+// NO incrementa el pin_count. Usar con precaución (principalmente para depuración).
+Byte* BufferManager::GetPageDataInPool(PageId page_id) {
+    auto it = page_table_.find(page_id);
+    if (it != page_table_.end()) {
+        return &buffer_data_pool_[it->second][0];
+    }
+    return nullptr; // Página no encontrada en el pool
+}
+
+// Actualiza el estado de un bloque en el DiskManager.
+Status BufferManager::UpdateBlockStatusOnDisk(PageId page_id, BlockStatus status) {
+    disk_manager_.UpdateBlockStatus(page_id, status);
+    return Status::OK; // Asume que DiskManager maneja sus propios errores
+}
+
+// Método auxiliar para encontrar un frame libre en el buffer pool.
+FrameId BufferManager::FindFreeFrame() {
+    for (FrameId i = 0; i < pool_size_; ++i) {
+        if (!frames_[i].is_valid) { // Un frame no válido está libre
+            return i;
+        }
+    }
+    return (FrameId)-1; // No hay frames libres
+}
+
+// Método auxiliar para desalojar una página del buffer pool.
+Status BufferManager::EvictPage() {
+    FrameId frame_to_evict = replacement_policy_->Evict();
+    if (frame_to_evict == (FrameId)-1) {
+        std::cerr << "Error (EvictPage): La política de reemplazo no pudo encontrar un frame desalojable." << std::endl;
+        return Status::BUFFER_FULL; // No hay páginas desalojables
+    }
+
+    PageId page_id_to_evict = frames_[frame_to_evict].page_id;
+
+    // Si la página está sucia, escribirla a disco antes de desalojarla.
+    if (frames_[frame_to_evict].is_dirty) {
+        Status write_status = WritePageToDisk(page_id_to_evict);
+        if (write_status != Status::OK) {
+            std::cerr << "Error (EvictPage): Fallo al escribir la página sucia " << page_id_to_evict << " al disco antes de desalojarla. " << StatusToString(write_status) << std::endl;
+            return write_status;
+        }
+    }
+
+    // Remover la página del page_table_ y resetear los metadatos del frame.
+    page_table_.erase(page_id_to_evict);
+    frames_[frame_to_evict].Reset();
+    replacement_policy_->RemoveFrame(frame_to_evict); // Notificar a la política que el frame ha sido removido
+
+    std::cout << "Página " << page_id_to_evict << " desalojada del frame " << frame_to_evict << "." << std::endl;
+    return Status::OK;
+}
+
+// Método auxiliar para escribir una página (datos de buffer_data_pool_)
+// de vuelta al disco físico (usando DiskManager).
+Status BufferManager::WritePageToDisk(PageId page_id) {
+    auto it = page_table_.find(page_id);
+    if (it == page_table_.end()) {
+        std::cerr << "Error (WritePageToDisk): Página " << page_id << " no encontrada en el buffer pool para escritura." << std::endl;
+        return Status::NOT_FOUND;
+    }
+    FrameId frame_id = it->second;
+
+    Block block_to_write(&buffer_data_pool_[frame_id][0], block_size_, block_size_);
+    Status write_status = disk_manager_.WriteBlock(page_id, block_to_write);
+    if (write_status != Status::OK) {
+        std::cerr << "Error (WritePageToDisk): Fallo al escribir el bloque " << page_id << " al disco. " << StatusToString(write_status) << std::endl;
+        return write_status;
+    }
+    // std::cout << "Página " << page_id << " escrita a disco desde frame " << frame_id << "." << std::endl;
+    return Status::OK;
+}
+
+// Método auxiliar para leer una página (datos del disco físico)
+// y cargarla en buffer_data_pool_.
+Status BufferManager::ReadPageFromDisk(PageId page_id, FrameId frame_id) {
+    Block block_to_read(block_size_); // Crear un bloque vacío del tamaño correcto
+    Status read_status = disk_manager_.ReadBlock(page_id, block_to_read);
+    if (read_status != Status::OK) {
+        std::cerr << "Error (ReadPageFromDisk): Fallo al leer el bloque " << page_id << " del disco. " << StatusToString(read_status) << std::endl;
+        return read_status;
+    }
+    // Copiar los datos leídos del bloque al frame del buffer pool
+    std::memcpy(&buffer_data_pool_[frame_id][0], block_to_read.GetData(), block_size_);
+    // std::cout << "Página " << page_id << " leída del disco a frame " << frame_id << "." << std::endl;
+    return Status::OK;
 }

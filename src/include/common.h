@@ -52,14 +52,12 @@ inline std::string StatusToString(Status status) {
 }
 
 // Enumeración para los tipos de página
-// Esto ayuda al DiskManager a optimizar la ubicación en disco.
 enum class PageType : uint8_t {
     INVALID_PAGE = 0,
-    DISK_METADATA_PAGE, // Página que contiene metadatos del disco (super-bloque)
-    CATALOG_PAGE,       // Página que contiene metadatos del catálogo (tablas, columnas, índices)
-    DATA_PAGE,          // Página que contiene registros de usuario
-    INDEX_PAGE,         // Página que contiene entradas de índice (ej. B+Tree)
-    // Añadir más tipos de página según sea necesario
+    DISK_METADATA_PAGE, // Página para metadatos del disco (ej. mapa de bits de sectores)
+    CATALOG_PAGE,       // Página para metadatos del catálogo (esquemas de tablas)
+    DATA_PAGE,          // Página que contiene registros de datos de una tabla
+    INDEX_PAGE          // Página que contiene entradas de un índice
 };
 
 // Función auxiliar para convertir PageType a string
@@ -74,12 +72,11 @@ inline std::string PageTypeToString(PageType type) {
     }
 }
 
-// Enumeración: Estados de un bloque lógico en el disco
-// Usado por DiskManager para gestionar el espacio de forma más granular.
+// Enumeración para el estado de un bloque físico en el disco
 enum class BlockStatus : uint8_t {
-    EMPTY = 0,      // El bloque está completamente vacío y disponible.
-    INCOMPLETE = 1, // El bloque está parcialmente ocupado, tiene espacio libre.
-    FULL = 2,       // El bloque está completamente lleno.
+    EMPTY = 0,      // Bloque completamente libre
+    INCOMPLETE,     // Bloque parcialmente ocupado (tiene espacio libre)
+    FULL            // Bloque completamente ocupado
 };
 
 // Función auxiliar para convertir BlockStatus a string
@@ -92,15 +89,15 @@ inline std::string BlockStatusToString(BlockStatus status) {
     }
 }
 
-// NUEVA ENUMERACIÓN: Tipos de datos para las columnas de una tabla
+// Enumeración para los tipos de columnas (datos) - MOVIDO AQUÍ
 enum class ColumnType : uint8_t {
     INT = 0,
-    CHAR,    // Fixed-length string (e.g., CHAR(10))
-    VARCHAR, // Variable-length string (e.g., VARCHAR(255))
-    // Añadir más tipos de datos según sea necesario (FLOAT, DATE, BOOL, etc.)
+    CHAR,
+    VARCHAR,
+    // Otros tipos de datos pueden ser añadidos aquí (FLOAT, DATE, etc.)
 };
 
-// Función auxiliar para convertir ColumnType a string
+// Función auxiliar para convertir ColumnType a string - MOVIDO AQUÍ
 inline std::string ColumnTypeToString(ColumnType type) {
     switch (type) {
         case ColumnType::INT: return "INT";
@@ -111,6 +108,7 @@ inline std::string ColumnTypeToString(ColumnType type) {
 }
 
 // NUEVA ESTRUCTURA: Metadata de una columna
+// Esta será parte del esquema de la tabla.
 struct ColumnMetadata {
     char name[64];      // Nombre de la columna (fijo para serialización)
     ColumnType type;    // Tipo de dato de la columna
@@ -128,7 +126,7 @@ struct TableMetadata {
     uint32_t table_id;              // Identificador único de la tabla
     char table_name[64];            // Nombre de la tabla (fijo para serialización)
     bool is_fixed_length_record;    // true si todos los registros de esta tabla son de longitud fija
-    PageId first_data_page_id;      // PageId de la primera DATA_PAGE de esta tabla
+    std::vector<PageId> data_page_ids; // Lista de PageIds que pertenecen a esta tabla
     uint32_t num_records;           // Número total de registros en la tabla (puede ser aproximado)
                                     // Este campo se actualizará con Insert/DeleteRecord
 
@@ -136,7 +134,7 @@ struct TableMetadata {
     uint32_t fixed_record_size;     // Tamaño total de un registro fijo (incluyendo delimitadores si los hubiera)
 
     TableMetadata() : table_id(0), is_fixed_length_record(true),
-                      first_data_page_id(0), num_records(0), fixed_record_size(0) {
+                      num_records(0), fixed_record_size(0) {
         std::fill(table_name, table_name + 64, 0); // Inicializar con ceros
     }
 };

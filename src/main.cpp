@@ -9,6 +9,7 @@
 #include <cctype>   // Para std::tolower
 #include <sstream>  // Para std::stringstream
 #include <algorithm> // Para std::replace
+#include <iomanip>  // Para std::setw, std::setfill
 
 // Incluir los headers de los componentes del SGBD
 #include "data_storage/disk_manager.h"
@@ -16,7 +17,7 @@
 #include "data_storage/buffer_manager.h"
 #include "replacement_policies/lru.h" // Incluir la política LRU
 #include "record_manager/record_manager.h" // Incluir el RecordManager
-#include "catalog_manager/catalog_manager.h" // <--- CAMBIO AQUÍ: Nombre de archivo sin espacio
+#include "catalog_manager/catalog_manager.h"
 #include "include/common.h" // Para Status, BlockSizeType, SectorSizeType, PageType, ColumnMetadata
 
 namespace fs = std::filesystem;
@@ -25,7 +26,7 @@ namespace fs = std::filesystem;
 std::unique_ptr<DiskManager> g_disk_manager = nullptr;
 std::unique_ptr<BufferManager> g_buffer_manager = nullptr;
 std::unique_ptr<RecordManager> g_record_manager = nullptr;
-std::unique_ptr<CatalogManager> g_catalog_manager = nullptr; // Nuevo: CatalogManager
+std::unique_ptr<CatalogManager> g_catalog_manager = nullptr;
 
 // Función auxiliar para limpiar el buffer de entrada
 void ClearInputBuffer() {
@@ -72,7 +73,7 @@ ColumnType GetColumnTypeFromUser() {
     std::cout << "  Seleccione el tipo de dato:" << std::endl;
     std::cout << "    0. INT" << std::endl;
     std::cout << "    1. CHAR" << std::endl;
-    std::cout << "    2. VARCHAR" << std::endl;
+    std::cout << "2. VARCHAR" << std::endl;
     int type_choice = GetNumericInput<int>("  Opción de tipo: ");
     switch (type_choice) {
         case 0: return ColumnType::INT;
@@ -91,7 +92,7 @@ void DisplayMainMenu() {
     std::cout << "1. Gestión del Disco" << std::endl;
     std::cout << "2. Gestión del Buffer Pool" << std::endl;
     std::cout << "3. Gestión de Datos (Tablas y Registros)" << std::endl;
-    std::cout << "4. Gestión de Metadatos (Catálogo)" << std::endl; // Ahora implementado
+    std::cout << "4. Gestión de Metadatos (Catálogo)" << std::endl;
     std::cout << "5. Gestión de Índices [No implementado]" << std::endl;
     std::cout << "6. Procesador de Consultas [No implementado]" << std::endl;
     std::cout << "7. Salir" << std::endl;
@@ -100,11 +101,14 @@ void DisplayMainMenu() {
 
 void DisplayDiskManagementMenu() {
     std::cout << "\n--- Menú: Gestión del Disco ---" << std::endl;
-    std::cout << "1. Ver Estado del Disco" << std::endl;
+    std::cout << "1. Ver Estado del Disco (Resumen)" << std::endl; // Cambiado
     std::cout << "2. Crear Nuevo Disco" << std::endl;
     std::cout << "3. Cargar Disco Existente" << std::endl;
     std::cout << "4. Eliminar Disco" << std::endl;
-    std::cout << "5. Volver al Menú Principal" << std::endl;
+    std::cout << "5. Ver Información Detallada del Disco" << std::endl; // NUEVO
+    std::cout << "6. Ver Mapa de Estado de Bloques" << std::endl; // NUEVO
+    std::cout << "7. Ver Mapeo Lógico a Físico" << std::endl; // NUEVO
+    std::cout << "8. Volver al Menú Principal" << std::endl; // Cambiado
     std::cout << "Ingrese su opción: ";
 }
 
@@ -112,15 +116,16 @@ void DisplayBufferPoolManagementMenu() {
     std::cout << "\n--- Menú: Gestión del Buffer Pool ---" << std::endl;
     std::cout << "1. Ver Estado del Buffer" << std::endl;
     std::cout << "2. Flushar Todas las Páginas Sucias" << std::endl;
-    std::cout << "3. Cambiar Tamaño del Buffer Pool [No implementado]" << std::endl;
-    std::cout << "4. Cambiar Algoritmo de Reemplazo [No implementado]" << std::endl;
-    std::cout << "5. Volver al Menú Principal" << std::endl;
+    std::cout << "3. Ver Tabla de Páginas del Buffer Pool" << std::endl; // NUEVO
+    std::cout << "4. Cambiar Tamaño del Buffer Pool [No implementado]" << std::endl;
+    std::cout << "5. Cambiar Algoritmo de Reemplazo [No implementado]" << std::endl;
+    std::cout << "6. Volver al Menú Principal" << std::endl;
     std::cout << "Ingrese su opción: ";
 }
 
 void DisplayDataManagementMenu() {
     std::cout << "\n--- Menú: Gestión de Datos (Tablas y Registros) ---" << std::endl;
-    std::cout << "1. Insertar Registro" << std::endl; // Directamente insertar, crear tabla es en catálogo
+    std::cout << "1. Insertar Registro" << std::endl;
     std::cout << "2. Seleccionar Registros" << std::endl;
     std::cout << "3. Actualizar Registro" << std::endl;
     std::cout << "4. Eliminar Registro" << std::endl;
@@ -132,7 +137,7 @@ void DisplayDataManagementMenu() {
 void DisplayCatalogManagementMenu() {
     std::cout << "\n--- Menú: Gestión de Metadatos (Catálogo) ---" << std::endl;
     std::cout << "1. Crear Nueva Tabla (Formulario)" << std::endl;
-    std::cout << "2. Crear Nueva Tabla (Desde Archivo)" << std::endl; // Nueva opción
+    std::cout << "2. Crear Nueva Tabla (Desde Archivo)" << std::endl;
     std::cout << "3. Ver Esquema de Tabla" << std::endl;
     std::cout << "4. Listar Tablas Existentes" << std::endl;
     std::cout << "5. Eliminar Tabla" << std::endl;
@@ -163,6 +168,47 @@ void ViewDiskStatus() {
     std::cout << "  Total de Bloques Lógicos: " << g_disk_manager->GetTotalLogicalBlocks() << std::endl;
     std::cout << "  Bloques Lógicos Libres: " << g_disk_manager->GetFreePhysicalSectors() / g_disk_manager->GetSectorsPerBlock() << std::endl;
 }
+
+// NUEVO: Función para ver información detallada del disco
+void ViewDetailedDiskInfo() {
+    if (!g_disk_manager) {
+        std::cout << "No hay un disco cargado o creado." << std::endl;
+        return;
+    }
+    std::cout << "\n--- Información Detallada del Disco: " << g_disk_manager->GetDiskName() << " ---" << std::endl;
+
+    uint64_t total_capacity_bytes = g_disk_manager->GetTotalCapacityBytes();
+    std::cout << "Capacidad Total del Disco: " << total_capacity_bytes << " bytes" << std::endl;
+
+    uint32_t total_logical_blocks = g_disk_manager->GetTotalLogicalBlocks();
+    uint32_t occupied_logical_blocks = g_disk_manager->GetOccupiedLogicalBlocks();
+    uint32_t free_logical_blocks = total_logical_blocks - occupied_logical_blocks;
+
+    std::cout << "Total de Bloques Lógicos: " << total_logical_blocks << std::endl;
+    std::cout << "Bloques Lógicos Ocupados: " << occupied_logical_blocks << std::endl;
+    std::cout << "Bloques Lógicos Libres: " << free_logical_blocks << std::endl;
+    std::cout << "Porcentaje de Ocupación: " << std::fixed << std::setprecision(2)
+              << g_disk_manager->GetDiskUsagePercentage() << "%" << std::endl;
+}
+
+// NUEVO: Función para ver el mapa de estado de bloques
+void ViewBlockStatusMap() {
+    if (!g_disk_manager) {
+        std::cout << "No hay un disco cargado o creado." << std::endl;
+        return;
+    }
+    g_disk_manager->PrintBlockStatusMap();
+}
+
+// NUEVO: Función para ver el mapeo lógico a físico
+void ViewLogicalToPhysicalMap() {
+    if (!g_disk_manager) {
+        std::cout << "No hay un disco cargado o creado." << std::endl;
+        return;
+    }
+    g_disk_manager->PrintLogicalToPhysicalMap();
+}
+
 
 void CreateNewDisk() {
     std::string disk_name;
@@ -206,24 +252,29 @@ void CreateNewDisk() {
     buffer_pool_size = GetNumericInput<uint32_t>("Ingrese el tamaño del Buffer Pool (número de frames, ej. 10): ");
 
     try {
-        // El constructor de DiskManager inicializa sus miembros con los parámetros dados
         g_disk_manager = std::make_unique<DiskManager>(disk_name, num_platters, num_surfaces_per_platter,
                                                        num_cylinders, num_sectors_per_track,
-                                                       block_size, sector_size, true); // is_new_disk = true
-        Status status = g_disk_manager->CreateDiskStructure(); // Esto creará la estructura y guardará metadatos
+                                                       block_size, sector_size, true);
+        Status status = g_disk_manager->CreateDiskStructure();
         if (status != Status::OK) {
             std::cerr << "Error al crear la estructura del disco: " << StatusToString(status) << std::endl;
-            g_disk_manager.reset(); // Limpiar el manager si falla
+            g_disk_manager.reset();
             return;
         }
         std::cout << "Disco '" << disk_name << "' creado exitosamente." << std::endl;
 
-        // Inicializar BufferManager y RecordManager después de crear el disco
-        // Usamos los parámetros del DiskManager que ahora son correctos.
         g_buffer_manager = std::make_unique<BufferManager>(*g_disk_manager, buffer_pool_size, g_disk_manager->GetBlockSize(), std::make_unique<LRUReplacementPolicy>());
+        
+        // Inicializar RecordManager y CatalogManager con constructores simplificados
+        // Ahora sus constructores solo requieren BufferManager, resolviendo la dependencia circular inicial.
         g_record_manager = std::make_unique<RecordManager>(*g_buffer_manager);
-        g_catalog_manager = std::make_unique<CatalogManager>(*g_buffer_manager, *g_record_manager); // Inicializar CatalogManager
-        g_catalog_manager->InitCatalog(); // Inicializar el catálogo (creará la CATALOG_PAGE si es necesario)
+        g_catalog_manager = std::make_unique<CatalogManager>(*g_buffer_manager);
+
+        // Establecer las referencias cruzadas usando los setters después de la construcción
+        g_record_manager->SetCatalogManager(*g_catalog_manager);
+        g_catalog_manager->SetRecordManager(*g_record_manager);
+
+        g_catalog_manager->InitCatalog();
 
     } catch (const std::exception& e) {
         std::cerr << "Error al crear el disco: " << e.what() << std::endl;
@@ -247,10 +298,8 @@ void LoadExistingDisk() {
     }
 
     try {
-        // Crear un DiskManager con parámetros temporales, luego cargar los reales.
-        // Los parámetros del constructor serán sobrescritos por LoadDiskMetadata.
-        g_disk_manager = std::make_unique<DiskManager>(disk_name, 1, 1, 1, 1, 512, 512, false); // is_new_disk = false
-        Status status = g_disk_manager->LoadDiskMetadata(); // Esto cargará todos los parámetros y el mapa
+        g_disk_manager = std::make_unique<DiskManager>(disk_name, 1, 1, 1, 1, 512, 512, false);
+        Status status = g_disk_manager->LoadDiskMetadata();
         if (status != Status::OK) {
             std::cerr << "Error al cargar los metadatos del disco: " << StatusToString(status) << std::endl;
             g_disk_manager.reset();
@@ -258,13 +307,19 @@ void LoadExistingDisk() {
         }
         std::cout << "Disco '" << disk_name << "' cargado exitosamente." << std::endl;
 
-        // Ahora que el DiskManager tiene los parámetros correctos, inicializar BufferManager y RecordManager
-        // Usamos los parámetros cargados del DiskManager.
         uint32_t buffer_pool_size = GetNumericInput<uint32_t>("Ingrese el tamaño del Buffer Pool para esta sesión (ej. 10): ");
         g_buffer_manager = std::make_unique<BufferManager>(*g_disk_manager, buffer_pool_size, g_disk_manager->GetBlockSize(), std::make_unique<LRUReplacementPolicy>());
+        
+        // Inicializar RecordManager y CatalogManager con constructores simplificados
+        // Ahora sus constructores solo requieren BufferManager, resolviendo la dependencia circular inicial.
         g_record_manager = std::make_unique<RecordManager>(*g_buffer_manager);
-        g_catalog_manager = std::make_unique<CatalogManager>(*g_buffer_manager, *g_record_manager); // Inicializar CatalogManager
-        g_catalog_manager->InitCatalog(); // Cargar el catálogo existente
+        g_catalog_manager = std::make_unique<CatalogManager>(*g_buffer_manager);
+
+        // Establecer las referencias cruzadas usando los setters después de la construcción
+        g_record_manager->SetCatalogManager(*g_catalog_manager);
+        g_catalog_manager->SetRecordManager(*g_record_manager);
+
+        g_catalog_manager->InitCatalog();
 
     } catch (const std::exception& e) {
         std::cerr << "Error al cargar el disco: " << e.what() << std::endl;
@@ -313,7 +368,6 @@ void ViewBufferStatus() {
     std::cout << "Tamaño total del Buffer Pool: " << g_buffer_manager->GetPoolSize() << " frames" << std::endl;
     std::cout << "Frames libres: " << g_buffer_manager->GetFreeFramesCount() << std::endl;
     std::cout << "Páginas actualmente en Buffer: " << g_buffer_manager->GetNumBufferedPages() << std::endl;
-    // TODO: Listar detalles de cada página en el buffer si se implementa en Page.h/BufferManager.
 }
 
 void FlushAllPages() {
@@ -329,6 +383,32 @@ void FlushAllPages() {
         std::cerr << "Error al flushar todas las páginas: " << StatusToString(status) << std::endl;
     }
 }
+
+// NUEVO: Función para ver la tabla de páginas del Buffer Pool
+void ViewBufferPoolTable() {
+    if (!g_buffer_manager) {
+        std::cout << "No hay un Buffer Manager inicializado. Cargue o cree un disco primero." << std::endl;
+        return;
+    }
+    std::cout << "\n--- Tabla de Páginas del Buffer Pool ---" << std::endl;
+    std::cout << std::left << std::setw(8) << "FrameId"
+              << std::setw(10) << "PageId"
+              << std::setw(10) << "PinCount"
+              << std::setw(8) << "Dirty"
+              << std::setw(8) << "Valid" << std::endl;
+    std::cout << std::string(54, '-') << std::endl;
+
+    const auto& frames = g_buffer_manager->GetFrames();
+    for (FrameId i = 0; i < frames.size(); ++i) {
+        const Page& frame_info = frames[i];
+        std::cout << std::left << std::setw(8) << i
+                  << std::setw(10) << (frame_info.is_valid ? std::to_string(frame_info.page_id) : "N/A")
+                  << std::setw(10) << frame_info.pin_count
+                  << std::setw(8) << (frame_info.is_dirty ? "Yes" : "No")
+                  << std::setw(8) << (frame_info.is_valid ? "Yes" : "No") << std::endl;
+    }
+}
+
 
 // --- Funciones de Gestión de Datos (Tablas y Registros) ---
 // Estas ahora interactúan con el CatalogManager para obtener el PageId de la tabla.
@@ -371,8 +451,6 @@ void InsertRecord() {
         return; // Error ya impreso por GetTableSchema
     }
 
-    PageId page_id = schema.base_metadata.first_data_page_id; // Usar la primera página de datos de la tabla
-
     std::string content;
     std::cout << "Ingrese el contenido del registro (texto, use ',' o '\\t' como delimitadores): ";
     std::getline(std::cin, content);
@@ -384,12 +462,60 @@ void InsertRecord() {
     new_rec.data.assign(processed_content.begin(), processed_content.end()); // Copiar contenido a vector<Byte>
 
     uint32_t slot_id;
-    Status status = g_record_manager->InsertRecord(page_id, new_rec, slot_id);
+    Status status = Status::ERROR;
+    PageId target_page_id = 0;
+
+    // 1. Intentar insertar en una página existente con espacio
+    for (PageId page_id : schema.base_metadata.data_page_ids) {
+        BlockSizeType free_space;
+        Status get_space_status = g_record_manager->GetFreeSpace(page_id, free_space);
+        if (get_space_status == Status::OK && free_space >= new_rec.data.size() + sizeof(SlotDirectoryEntry)) {
+            // Asumimos que el slot directory entry también necesita espacio
+            status = g_record_manager->InsertRecord(page_id, new_rec, slot_id);
+            if (status == Status::OK) {
+                target_page_id = page_id;
+                break; // Registro insertado, salir del bucle
+            }
+        }
+    }
+
+    // 2. Si no se encontró espacio en ninguna página existente, crear una nueva página
+    if (status != Status::OK) {
+        std::cout << "No hay espacio en las páginas existentes. Creando nueva página para la tabla..." << std::endl;
+        PageId new_data_page_id;
+        // Corrected: Use g_buffer_manager->NewPage
+        Byte* new_page_data = g_buffer_manager->NewPage(new_data_page_id, PageType::DATA_PAGE);
+        if (new_page_data == nullptr) {
+            std::cerr << "Error: Fallo al crear una nueva página de datos para la tabla." << std::endl;
+            return;
+        }
+        // Inicializar la nueva página
+        Status init_status = g_record_manager->InitDataPage(new_data_page_id);
+        if (init_status != Status::OK) {
+            std::cerr << "Error: Fallo al inicializar la nueva página de datos." << std::endl;
+            g_buffer_manager->DeletePage(new_data_page_id); // Limpiar si falla
+            return;
+        }
+        // Añadir la nueva página al esquema de la tabla en el catálogo
+        Status add_page_status = g_catalog_manager->AddDataPageToTable(table_name, new_data_page_id);
+        if (add_page_status != Status::OK) {
+            std::cerr << "Error: Fallo al añadir la nueva página al catálogo de la tabla." << std::endl;
+            // Podríamos intentar eliminar la página recién creada aquí, pero podría ser inconsistente.
+            return;
+        }
+        
+        // Intentar insertar el registro en la nueva página
+        status = g_record_manager->InsertRecord(new_data_page_id, new_rec, slot_id);
+        if (status == Status::OK) {
+            target_page_id = new_data_page_id;
+        }
+    }
+
     if (status == Status::OK) {
-        std::cout << "Registro insertado exitosamente en Page " << page_id << ", Slot " << slot_id << "." << std::endl;
-        // Opcional: Actualizar num_records en TableMetadata y guardar el catálogo.
-        // Esto es más complejo ya que TableMetadata está en el catálogo y no es directamente modificable aquí.
-        // Por ahora, lo dejaremos como una mejora futura.
+        std::cout << "Registro insertado exitosamente en Page " << target_page_id << ", Slot " << slot_id << "." << std::endl;
+        // Actualizar num_records en TableMetadata.
+        schema.base_metadata.num_records++; // Incrementar el conteo en la copia local
+        g_catalog_manager->UpdateTableNumRecords(table_name, schema.base_metadata.num_records); // Persistir el cambio
     } else {
         std::cerr << "Error al insertar registro: " << StatusToString(status) << std::endl;
     }
@@ -408,29 +534,41 @@ void SelectRecords() {
     if (get_schema_status != Status::OK) {
         return;
     }
-    PageId page_id = schema.base_metadata.first_data_page_id;
 
-    Byte* page_data_for_read = g_buffer_manager->FetchPage(page_id);
-    if (page_data_for_read == nullptr) {
-        std::cerr << "Error: No se pudo obtener la página " << page_id << " para seleccionar registros." << std::endl;
+    if (schema.base_metadata.data_page_ids.empty()) {
+        std::cout << "La tabla '" << table_name << "' no tiene páginas de datos asignadas." << std::endl;
         return;
     }
-    BlockHeader header_for_read;
-    std::memcpy(&header_for_read, page_data_for_read, sizeof(BlockHeader));
-    g_buffer_manager->UnpinPage(page_id, false); // Unpin inmediatamente
 
-    std::cout << "Iterando sobre " << header_for_read.num_slots << " slots posibles en la tabla '" << table_name << "':" << std::endl;
-    for (uint32_t i = 0; i < header_for_read.num_slots; ++i) {
-        Record fetched_rec;
-        Status status = g_record_manager->GetRecord(page_id, i, fetched_rec);
-        if (status == Status::OK) {
-            std::cout << "  Slot " << i << ": " << std::string(fetched_rec.data.begin(), fetched_rec.data.end()) << std::endl;
-        } else if (status == Status::NOT_FOUND) {
-            std::cout << "  Slot " << i << ": [Vacío]" << std::endl;
-        } else {
-            std::cerr << "  Error al leer Slot " << i << ": " << StatusToString(status) << std::endl;
+    uint32_t total_records_found = 0;
+    std::cout << "Registros en la tabla '" << table_name << "':" << std::endl;
+
+    for (PageId page_id : schema.base_metadata.data_page_ids) {
+        // Corrected: Use g_buffer_manager->FetchPage
+        Byte* page_data_for_read = g_buffer_manager->FetchPage(page_id);
+        if (page_data_for_read == nullptr) {
+            std::cerr << "Advertencia: No se pudo obtener la página " << page_id << " para seleccionar registros. Saltando esta página." << std::endl;
+            continue;
+        }
+        BlockHeader header_for_read;
+        std::memcpy(&header_for_read, page_data_for_read, sizeof(BlockHeader));
+        g_buffer_manager->UnpinPage(page_id, false); // Unpin inmediatamente
+
+        std::cout << "  --- Página " << page_id << " (Slots: " << header_for_read.num_slots << ") ---" << std::endl;
+        for (uint32_t i = 0; i < header_for_read.num_slots; ++i) {
+            Record fetched_rec;
+            Status status = g_record_manager->GetRecord(page_id, i, fetched_rec);
+            if (status == Status::OK) {
+                std::cout << "    Page " << page_id << ", Slot " << i << ": " << std::string(fetched_rec.data.begin(), fetched_rec.data.end()) << std::endl;
+                total_records_found++;
+            } else if (status == Status::NOT_FOUND) {
+                // std::cout << "    Page " << page_id << ", Slot " << i << ": [Vacío]" << std::endl;
+            } else {
+                std::cerr << "    Error al leer Page " << page_id << ", Slot " << i << ": " << StatusToString(status) << std::endl;
+            }
         }
     }
+    std::cout << "Total de registros encontrados en la tabla '" << table_name << "': " << total_records_found << std::endl;
 }
 
 void UpdateRecord() {
@@ -446,8 +584,13 @@ void UpdateRecord() {
     if (get_schema_status != Status::OK) {
         return;
     }
-    PageId page_id = schema.base_metadata.first_data_page_id;
 
+    if (schema.base_metadata.data_page_ids.empty()) {
+        std::cout << "La tabla '" << table_name << "' no tiene páginas de datos asignadas." << std::endl;
+        return;
+    }
+
+    PageId target_page_id = GetNumericInput<PageId>("Ingrese el PageId del registro a actualizar: ");
     uint32_t slot_id = GetNumericInput<uint32_t>("Ingrese el SlotId del registro a actualizar: ");
     std::string content;
     std::cout << "Ingrese el nuevo contenido del registro (texto, use ',' o '\\t' como delimitadores): ";
@@ -459,9 +602,27 @@ void UpdateRecord() {
     Record updated_rec;
     updated_rec.data.assign(processed_content.begin(), processed_content.end());
 
-    Status status = g_record_manager->UpdateRecord(page_id, slot_id, updated_rec);
+    // Verificar si el PageId proporcionado pertenece a la tabla
+    bool page_found_in_table = false;
+    for (PageId p_id : schema.base_metadata.data_page_ids) {
+        if (p_id == target_page_id) {
+            page_found_in_table = true;
+            break;
+        }
+    }
+
+    if (!page_found_in_table) {
+        std::cerr << "Error: PageId " << target_page_id << " no pertenece a la tabla '" << table_name << "'." << std::endl;
+        return;
+    }
+
+    // Para la actualización, necesitamos saber si el tamaño del registro cambia y si eso afecta el conteo.
+    // Una actualización que reinserta un registro podría cambiar el slot_id y potencialmente el num_records.
+    // Por simplicidad, asumiremos que UpdateRecord no cambia el num_records total de la tabla.
+    // Si UpdateRecord borra y reinserta, el num_records se mantendría igual (un borrado, una inserción).
+    Status status = g_record_manager->UpdateRecord(target_page_id, slot_id, updated_rec);
     if (status == Status::OK) {
-        std::cout << "Registro actualizado exitosamente en Page " << page_id << ", Slot " << slot_id << "." << std::endl;
+        std::cout << "Registro actualizado exitosamente en Page " << target_page_id << ", Slot " << slot_id << "." << std::endl;
     } else {
         std::cerr << "Error al actualizar registro: " << StatusToString(status) << std::endl;
     }
@@ -480,14 +641,37 @@ void DeleteRecord() {
     if (get_schema_status != Status::OK) {
         return;
     }
-    PageId page_id = schema.base_metadata.first_data_page_id;
 
+    if (schema.base_metadata.data_page_ids.empty()) {
+        std::cout << "La tabla '" << table_name << "' no tiene páginas de datos asignadas." << std::endl;
+        return;
+    }
+
+    PageId target_page_id = GetNumericInput<PageId>("Ingrese el PageId del registro a eliminar: ");
     uint32_t slot_id = GetNumericInput<uint32_t>("Ingrese el SlotId del registro a eliminar: ");
 
-    Status status = g_record_manager->DeleteRecord(page_id, slot_id);
+    // Verificar si el PageId proporcionado pertenece a la tabla
+    bool page_found_in_table = false;
+    for (PageId p_id : schema.base_metadata.data_page_ids) {
+        if (p_id == target_page_id) {
+            page_found_in_table = true;
+            break;
+        }
+    }
+
+    if (!page_found_in_table) {
+        std::cerr << "Error: PageId " << target_page_id << " no pertenece a la tabla '" << table_name << "'." << std::endl;
+        return;
+    }
+
+    Status status = g_record_manager->DeleteRecord(target_page_id, slot_id);
     if (status == Status::OK) {
-        std::cout << "Registro eliminado exitosamente de Page " << page_id << ", Slot " << slot_id << "." << std::endl;
-        // Opcional: Actualizar num_records en TableMetadata y guardar el catálogo.
+        std::cout << "Registro eliminado exitosamente de Page " << target_page_id << ", Slot " << slot_id << "." << std::endl;
+        // Actualizar num_records en TableMetadata.
+        if (schema.base_metadata.num_records > 0) {
+            schema.base_metadata.num_records--; // Decrementar el conteo en la copia local
+            g_catalog_manager->UpdateTableNumRecords(table_name, schema.base_metadata.num_records); // Persistir el cambio
+        }
     } else {
         std::cerr << "Error al eliminar registro: " << StatusToString(status) << std::endl;
     }
@@ -501,10 +685,17 @@ void ViewBlockContentDebug() {
     std::cout << "\n--- Ver Contenido de Bloque (Debug) ---" << std::endl;
     PageId page_id = GetNumericInput<PageId>("Ingrese el PageId del bloque a inspeccionar: ");
 
-    const Byte* block_data = g_buffer_manager->FetchPage(page_id); // Fetch the page to ensure it's in buffer
+    // Fetch the page to ensure it's in buffer and get a pointer to its data in the buffer pool
+    // Corrected: Use g_buffer_manager->GetPageDataInPool
+    Byte* block_data = g_buffer_manager->GetPageDataInPool(page_id);
     if (block_data == nullptr) {
-        std::cerr << "Error: No se pudo obtener los datos del bloque " << page_id << "." << std::endl;
-        return;
+        // If not in buffer, try to fetch it to bring it into the buffer
+        // Corrected: Use g_buffer_manager->FetchPage
+        block_data = g_buffer_manager->FetchPage(page_id);
+        if (block_data == nullptr) {
+            std::cerr << "Error: No se pudo obtener los datos del bloque " << page_id << " (no está en buffer y no se pudo cargar)." << std::endl;
+            return;
+        }
     }
 
     std::cout << "Datos brutos del bloque " << page_id << " (primeros 128 bytes):" << std::endl;
@@ -647,7 +838,15 @@ void ViewTableSchema() {
         } else {
             std::cout << "  Tamaño Total de Registro Variable (se determina en tiempo de ejecución)" << std::endl;
         }
-        std::cout << "  Primera Página de Datos (PageId): " << schema.base_metadata.first_data_page_id << std::endl;
+        // Mostrar todas las páginas de datos
+        std::cout << "  Páginas de Datos (PageIds): [";
+        for (size_t i = 0; i < schema.base_metadata.data_page_ids.size(); ++i) {
+            std::cout << schema.base_metadata.data_page_ids[i];
+            if (i < schema.base_metadata.data_page_ids.size() - 1) {
+                std::cout << ", ";
+            }
+        }
+        std::cout << "]" << std::endl;
         std::cout << "  Número Total de Registros (aproximado): " << schema.base_metadata.num_records << std::endl;
 
         std::cout << "\n  Columnas:" << std::endl;
@@ -719,10 +918,13 @@ void HandleDiskManagement() {
             case 2: CreateNewDisk(); break;
             case 3: LoadExistingDisk(); break;
             case 4: DeleteDisk(); break;
-            case 5: std::cout << "Volviendo al Menú Principal." << std::endl; break;
+            case 5: ViewDetailedDiskInfo(); break;
+            case 6: ViewBlockStatusMap(); break;
+            case 7: ViewLogicalToPhysicalMap(); break;
+            case 8: std::cout << "Volviendo al Menú Principal." << std::endl; break;
             default: std::cout << "Opción inválida. Intente de nuevo." << std::endl; break;
         }
-    } while (choice != 5);
+    } while (choice != 8); // Cambiado a 8
 }
 
 void HandleBufferPoolManagement() {
@@ -738,12 +940,13 @@ void HandleBufferPoolManagement() {
         switch (choice) {
             case 1: ViewBufferStatus(); break;
             case 2: FlushAllPages(); break;
-            case 3: std::cout << "Funcionalidad no implementada aún." << std::endl; break;
+            case 3: ViewBufferPoolTable(); break; // NUEVO
             case 4: std::cout << "Funcionalidad no implementada aún." << std::endl; break;
-            case 5: std::cout << "Volviendo al Menú Principal." << std::endl; break;
+            case 5: std::cout << "Funcionalidad no implementada aún." << std::endl; break;
+            case 6: std::cout << "Volviendo al Menú Principal." << std::endl; break;
             default: std::cout << "Opción inválida. Intente de nuevo." << std::endl; break;
         }
-    } while (choice != 5);
+    } while (choice != 6); // Cambiado a 6
 }
 
 void HandleDataManagement() {
@@ -803,7 +1006,7 @@ int main() {
             case 1: HandleDiskManagement(); break;
             case 2: HandleBufferPoolManagement(); break;
             case 3: HandleDataManagement(); break;
-            case 4: HandleCatalogManagement(); break; // Nueva opción de menú
+            case 4: HandleCatalogManagement(); break;
             case 5: std::cout << "Gestión de Índices - Funcionalidad no implementada aún." << std::endl; break;
             case 6: std::cout << "Procesador de Consultas - Funcionalidad no implementada aún." << std::endl; break;
             case 7: std::cout << "Saliendo del SGBD. ¡Adiós!" << std::endl; break;

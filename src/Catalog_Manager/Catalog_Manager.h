@@ -4,20 +4,19 @@
 
 #include "../include/common.h"     // Para Status, PageId, ColumnType, ColumnMetadata, TableMetadata
 #include "../data_storage/buffer_manager.h" // Para BufferManager
-#include "../record_manager/record_manager.h" // Para RecordManager
 
-#include <vector>                   // Para std::vector
-#include <string>                   // Para std::string
-#include <unordered_map>            // Para mapas internos de búsqueda rápida
-#include <tuple>                    // Para std::tuple (aunque usaremos struct para ColumnMetadata)
+// Forward declarations para resolver dependencias circulares
+class RecordManager; 
+
+// Incluir record_manager.h para obtener la definición completa de Record struct
+// Esto es necesario porque SerializeTableSchema y DeserializeTableSchema usan Record por valor/referencia.
+#include "../record_manager/record_manager.h" 
 
 // Estructura interna para el CatalogManager que combina TableMetadata con las columnas.
 // Esta es la representación en memoria, no necesariamente la que se serializa directamente.
 struct FullTableSchema {
     TableMetadata base_metadata;
     std::vector<ColumnMetadata> columns;
-    // Podríamos añadir aquí una lista de PageIds que pertenecen a esta tabla,
-    // pero por ahora, solo first_data_page_id es suficiente para empezar.
 };
 
 // Clase CatalogManager: Gestiona los metadatos de las tablas, columnas e índices.
@@ -26,32 +25,31 @@ class CatalogManager {
 public:
     // Constructor del CatalogManager.
     // buffer_manager: Referencia al BufferManager para interactuar con las páginas.
-    // record_manager: Referencia al RecordManager para gestionar registros de metadatos.
-    CatalogManager(BufferManager& buffer_manager, RecordManager& record_manager);
+    // NOTA: Se ha simplificado el constructor para romper la dependencia circular.
+    CatalogManager(BufferManager& buffer_manager);
+
+    // Método setter para el RecordManager (para resolver la dependencia circular)
+    void SetRecordManager(RecordManager& record_manager);
 
     // Inicializa el catálogo (crea la primera CATALOG_PAGE si no existe).
-    // Esto se llamará al iniciar el SGBD.
     Status InitCatalog();
 
-    // Crea una nueva tabla y persiste su metadata (interactivo/formulario).
-    // table_name: Nombre de la tabla.
-    // columns: Vector de ColumnMetadata que define el esquema de la tabla.
-    // is_fixed_length_record: true si los registros de la tabla son de longitud fija.
-    Status CreateTable(const std::string& table_name,
-                       const std::vector<ColumnMetadata>& columns,
-                       bool is_fixed_length_record);
+    // Crea una nueva tabla y la registra en el catálogo.
+    // table_name: Nombre de la nueva tabla.
+    // columns: Vector de metadatos de las columnas de la tabla.
+    // is_fixed_length_record: true si los registros de esta tabla son de longitud fija.
+    Status CreateTable(const std::string& table_name, const std::vector<ColumnMetadata>& columns, bool is_fixed_length_record);
 
-    // Crea una nueva tabla y persiste su metadata a partir de un archivo de texto.
-    // file_path: Ruta al archivo de texto que contiene el esquema y datos.
+    // Crea una nueva tabla a partir de un archivo de texto (esquema inferido).
+    // file_path: Ruta al archivo de texto con los datos.
     Status CreateTableFromPath(const std::string& file_path);
 
-    // Obtiene la metadata completa de una tabla por su nombre.
+    // Obtiene el esquema completo de una tabla.
     // table_name: Nombre de la tabla a buscar.
-    // schema: Referencia donde se almacenará la metadata completa (salida).
-    // Retorna Status::OK si se encuentra, Status::NOT_FOUND en caso contrario.
+    // schema: Referencia a un FullTableSchema donde se copiará el esquema (salida).
     Status GetTableSchema(const std::string& table_name, FullTableSchema& schema);
 
-    // Elimina una tabla y toda su metadata del catálogo.
+    // Elimina una tabla del catálogo.
     // También debe liberar todas las páginas de datos asociadas a la tabla.
     // table_name: Nombre de la tabla a eliminar.
     Status DropTable(const std::string& table_name);
@@ -66,9 +64,18 @@ public:
     // Método para guardar todo el catálogo en las CATALOG_PAGEs.
     Status SaveCatalog();
 
+    // Método para añadir una nueva PageId de datos a una tabla existente.
+    // Esto es crucial para la gestión de tablas multi-página.
+    Status AddDataPageToTable(const std::string& table_name, PageId new_data_page_id);
+
+    // NUEVO: Método para actualizar el número de registros de una tabla.
+    // table_name: Nombre de la tabla a actualizar.
+    // new_num_records: El nuevo conteo de registros para la tabla.
+    Status UpdateTableNumRecords(const std::string& table_name, uint32_t new_num_records);
+
 private:
     BufferManager& buffer_manager_;
-    RecordManager& record_manager_;
+    RecordManager* record_manager_; // Puntero al gestor de registros (para romper la dependencia circular)
 
     // El PageId de la primera CATALOG_PAGE. Podríamos tener una lista de ellas si el catálogo crece mucho.
     PageId catalog_page_id_;
@@ -81,9 +88,6 @@ private:
     // Métodos auxiliares para serializar/deserializar FullTableSchema a/desde Record.
     Record SerializeTableSchema(const FullTableSchema& schema) const;
     FullTableSchema DeserializeTableSchema(const Record& record) const;
-
-    // Método auxiliar para encontrar un slot libre o crear uno nuevo en la CATALOG_PAGE.
-    Status FindOrCreateCatalogSlot(uint32_t& slot_id);
 };
 
 #endif // CATALOG_MANAGER_H

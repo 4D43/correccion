@@ -36,6 +36,7 @@ public:
     virtual void AddFrame(FrameId frame_id) = 0;
 
     // Método para notificar a la política que un frame ha sido removido del buffer pool.
+    // Esto es útil para limpiar estructuras internas de la política.
     virtual void RemoveFrame(FrameId frame_id) = 0;
 };
 

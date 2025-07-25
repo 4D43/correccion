@@ -19,6 +19,11 @@ void LRUReplacementPolicy::Unpin(FrameId frame_id) {
     // Aquí simplemente nos aseguramos de que esté en el mapa para futuras llamadas a Access.
     // La lógica de añadir al final de la lista se maneja en Access().
     // std::cout << "LRU: Frame " << frame_id << " unpinned." << std::endl;
+    
+    // Si el frame no está en el mapa, lo añadimos al final de la lista LRU.
+    // Esto es para asegurar que las páginas desancladas se consideren recientemente usadas.
+    // La política de reemplazo solo se preocupa por páginas desancladas.
+    Access(frame_id); 
 }
 
 void LRUReplacementPolicy::Access(FrameId frame_id) {
@@ -27,23 +32,39 @@ void LRUReplacementPolicy::Access(FrameId frame_id) {
         // Si la página ya está en la lista, moverla al final (más recientemente usada).
         lru_list_.erase(it->second);
     }
-    // Añadir (o re-añadir) la página al final de la lista.
+    // Añadir la página al final de la lista.
     lru_list_.push_back(frame_id);
-    lru_map_[frame_id] = --lru_list_.end(); // Actualizar el iterador en el mapa
+    lru_map_[frame_id] = --lru_list_.end(); // Guardar el iterador al nuevo final
     // std::cout << "LRU: Frame " << frame_id << " accessed and moved to MRU end." << std::endl;
 }
 
 FrameId LRUReplacementPolicy::Evict() {
+    // Buscar la primera página en la lista que no esté anclada (pin_count == 0).
+    // La política LRU solo gestiona páginas desancladas.
+    // El BufferManager es responsable de verificar el pin_count.
+    // Aquí, simplemente retornamos el elemento al principio de la lista.
+    // El BufferManager verificará el pin_count antes de desalojar.
+    
     // Iterar la lista desde el principio (menos recientemente usado)
     for (auto it = lru_list_.begin(); it != lru_list_.end(); ++it) {
-        // En una implementación real, aquí se verificaría si la página está anclada
-        // usando el pin_count del BufferManager.
-        // Aquí, asumimos que Pin() ya la removió si estaba anclada.
         FrameId frame_to_evict = *it;
-        // No la removemos de la lista aquí, eso lo hará el BufferManager
-        // cuando llame a RemoveFrame después de desalojarla.
-        // std::cout << "LRU: Suggesting frame " << frame_to_evict << " for eviction." << std::endl;
-        return frame_to_evict;
+        // La política LRU solo sugiere un frame. El BufferManager es quien verifica
+        // si el frame está anclado o no. Si está anclado, el BufferManager
+        // debería pedir otro frame a la política.
+        // Para esta implementación simple, asumimos que el primer elemento no anclado
+        // es el candidato. Si todos están anclados, el Evict() del BufferManager
+        // debería manejarlo.
+        
+        // En una implementación más robusta, Evict() podría necesitar información
+        // sobre el pin_count de cada frame, que no está directamente en la política.
+        // Sin embargo, la interfaz IReplacementPolicy no proporciona pin_count.
+        // Por lo tanto, la política solo sugiere el LRU, y el BufferManager decide.
+
+        // Si la lista no está vacía, el primer elemento es el LRU.
+        if (!lru_list_.empty()) {
+            // std::cout << "LRU: Suggesting frame " << frame_to_evict << " for eviction." << std::endl;
+            return frame_to_evict; // Retorna el candidato LRU
+        }
     }
     // std::cout << "LRU: No evictable frames found." << std::endl;
     return (FrameId)-1; // No hay frames desalojables
