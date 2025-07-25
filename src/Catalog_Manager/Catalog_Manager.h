@@ -4,6 +4,7 @@
 
 #include "../include/common.h"     // Para Status, PageId, ColumnType, ColumnMetadata, TableMetadata
 #include "../data_storage/buffer_manager.h" // Para BufferManager
+#include <unordered_map> // Para std::unordered_map
 
 // Forward declarations para resolver dependencias circulares
 class RecordManager; 
