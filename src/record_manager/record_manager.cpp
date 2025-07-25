@@ -1,6 +1,6 @@
 // record_manager/record_manager.cpp
 #include "record_manager.h"
-#include "../catalog_manager/catalog_manager.h" // Incluir para la definición completa de CatalogManager
+#include "../Catalog_Manager/Catalog_Manager.h" // Incluir para la definición completa de CatalogManager
 #include <cstring> // Para std::memcpy
 #include <algorithm> // Para std::min, std::max, std::fill
 #include <iostream> // Para std::cout, std::cerr

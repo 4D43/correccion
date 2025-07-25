@@ -17,7 +17,8 @@
 #include "data_storage/buffer_manager.h"
 #include "replacement_policies/lru.h" // Incluir la política LRU
 #include "record_manager/record_manager.h" // Incluir el RecordManager
-#include "catalog_manager/catalog_manager.h"
+#include "Catalog_Manager/Catalog_Manager.h"
+#include "query_processor/query_processor.h" // Incluir el Query Processor
 #include "include/common.h" // Para Status, BlockSizeType, SectorSizeType, PageType, ColumnMetadata
 
 namespace fs = std::filesystem;
@@ -27,6 +28,7 @@ std::unique_ptr<DiskManager> g_disk_manager = nullptr;
 std::unique_ptr<BufferManager> g_buffer_manager = nullptr;
 std::unique_ptr<RecordManager> g_record_manager = nullptr;
 std::unique_ptr<CatalogManager> g_catalog_manager = nullptr;
+std::unique_ptr<QueryProcessor> g_query_processor = nullptr;
 
 // Función auxiliar para limpiar el buffer de entrada
 void ClearInputBuffer() {
@@ -94,7 +96,7 @@ void DisplayMainMenu() {
     std::cout << "3. Gestión de Datos (Tablas y Registros)" << std::endl;
     std::cout << "4. Gestión de Metadatos (Catálogo)" << std::endl;
     std::cout << "5. Gestión de Índices [No implementado]" << std::endl;
-    std::cout << "6. Procesador de Consultas [No implementado]" << std::endl;
+    std::cout << "6. Procesador de Consultas SQL" << std::endl;
     std::cout << "7. Salir" << std::endl;
     std::cout << "Ingrese su opción: ";
 }
@@ -142,6 +144,18 @@ void DisplayCatalogManagementMenu() {
     std::cout << "4. Listar Tablas Existentes" << std::endl;
     std::cout << "5. Eliminar Tabla" << std::endl;
     std::cout << "6. Volver al Menú Principal" << std::endl;
+    std::cout << "Ingrese su opción: ";
+}
+
+void DisplayQueryProcessorMenu() {
+    std::cout << "\n--- Menú: Procesador de Consultas SQL ---" << std::endl;
+    std::cout << "1. Ejecutar Consulta SQL" << std::endl;
+    std::cout << "2. Ejecutar Consulta con Modo Verbose" << std::endl;
+    std::cout << "3. Ver Información de la Última Consulta" << std::endl;
+    std::cout << "4. Ver Plan de Ejecución de la Última Consulta" << std::endl;
+    std::cout << "5. Ver Estadísticas de la Última Consulta" << std::endl;
+    std::cout << "6. Consultas de Ejemplo" << std::endl;
+    std::cout << "7. Volver al Menú Principal" << std::endl;
     std::cout << "Ingrese su opción: ";
 }
 
@@ -274,6 +288,9 @@ void CreateNewDisk() {
         g_record_manager->SetCatalogManager(*g_catalog_manager);
         g_catalog_manager->SetRecordManager(*g_record_manager);
 
+        // Inicializar el Query Processor
+        g_query_processor = std::make_unique<QueryProcessor>(*g_catalog_manager, *g_record_manager);
+
         g_catalog_manager->InitCatalog();
 
     } catch (const std::exception& e) {
@@ -282,6 +299,7 @@ void CreateNewDisk() {
         g_buffer_manager.reset();
         g_record_manager.reset();
         g_catalog_manager.reset();
+        g_query_processor.reset();
     }
 }
 
@@ -319,6 +337,9 @@ void LoadExistingDisk() {
         g_record_manager->SetCatalogManager(*g_catalog_manager);
         g_catalog_manager->SetRecordManager(*g_record_manager);
 
+        // Inicializar el Query Processor
+        g_query_processor = std::make_unique<QueryProcessor>(*g_catalog_manager, *g_record_manager);
+
         g_catalog_manager->InitCatalog();
 
     } catch (const std::exception& e) {
@@ -327,6 +348,7 @@ void LoadExistingDisk() {
         g_buffer_manager.reset();
         g_record_manager.reset();
         g_catalog_manager.reset();
+        g_query_processor.reset();
     }
 }
 
@@ -348,6 +370,7 @@ void DeleteDisk() {
                 g_buffer_manager.reset();
                 g_record_manager.reset();
                 g_catalog_manager.reset();
+                g_query_processor.reset();
                 std::cout << "El disco actual ha sido eliminado, managers reseteados." << std::endl;
             }
         } catch (const fs::filesystem_error& e) {
@@ -904,6 +927,118 @@ void DeleteTable() {
     }
 }
 
+// --- Funciones del Procesador de Consultas SQL ---
+
+void ExecuteSQLQuery() {
+    if (!g_query_processor) {
+        std::cout << "Query Processor no inicializado. Cree o cargue un disco primero." << std::endl;
+        return;
+    }
+    
+    std::cout << "\n--- Ejecutar Consulta SQL ---" << std::endl;
+    std::cout << "Ingrese su consulta SQL (o 'quit' para salir):" << std::endl;
+    std::cout << "SQL> ";
+    
+    std::string sql;
+    std::getline(std::cin, sql);
+    
+    if (sql == "quit" || sql.empty()) {
+        return;
+    }
+    
+    auto result = g_query_processor->ProcessQuery(sql);
+    
+    if (result->success) {
+        std::cout << "\n--- Resultado de la Consulta ---" << std::endl;
+        
+        // Mostrar nombres de columnas
+        if (!result->column_names.empty()) {
+            for (size_t i = 0; i < result->column_names.size(); ++i) {
+                std::cout << std::setw(15) << result->column_names[i];
+                if (i < result->column_names.size() - 1) std::cout << " | ";
+            }
+            std::cout << std::endl;
+            std::cout << std::string(result->column_names.size() * 18, '-') << std::endl;
+        }
+        
+        // Mostrar filas
+        for (const auto& row : result->rows) {
+            for (size_t i = 0; i < row.size(); ++i) {
+                std::cout << std::setw(15) << row[i];
+                if (i < row.size() - 1) std::cout << " | ";
+            }
+            std::cout << std::endl;
+        }
+        
+        std::cout << "\nFilas afectadas/retornadas: " << result->affected_rows << std::endl;
+    } else {
+        std::cout << "Error en la consulta: " << result->error_message << std::endl;
+    }
+}
+
+void ExecuteSQLQueryVerbose() {
+    if (!g_query_processor) {
+        std::cout << "Query Processor no inicializado. Cree o cargue un disco primero." << std::endl;
+        return;
+    }
+    
+    g_query_processor->SetVerboseMode(true);
+    ExecuteSQLQuery();
+    g_query_processor->SetVerboseMode(false);
+}
+
+void ShowLastQueryInfo() {
+    if (!g_query_processor) {
+        std::cout << "Query Processor no inicializado." << std::endl;
+        return;
+    }
+    
+    std::cout << "\n" << g_query_processor->GetLastParsedQueryInfo() << std::endl;
+}
+
+void ShowLastExecutionPlan() {
+    if (!g_query_processor) {
+        std::cout << "Query Processor no inicializado." << std::endl;
+        return;
+    }
+    
+    std::cout << "\n" << g_query_processor->GetLastExecutionPlanInfo() << std::endl;
+}
+
+void ShowLastQueryStats() {
+    if (!g_query_processor) {
+        std::cout << "Query Processor no inicializado." << std::endl;
+        return;
+    }
+    
+    const auto& stats = g_query_processor->GetLastStats();
+    std::cout << "\n--- Estadísticas de la Última Consulta ---" << std::endl;
+    std::cout << "Tiempo de Parsing: " << stats.parse_time_ms << " ms" << std::endl;
+    std::cout << "Tiempo de Optimización: " << stats.optimization_time_ms << " ms" << std::endl;
+    std::cout << "Tiempo de Ejecución: " << stats.execution_time_ms << " ms" << std::endl;
+    std::cout << "Tiempo Total: " << stats.total_time_ms << " ms" << std::endl;
+    std::cout << "Costo Estimado: " << stats.estimated_cost << std::endl;
+    std::cout << "Operadores en el Plan: " << stats.plan_operators_count << std::endl;
+}
+
+void ShowExampleQueries() {
+    std::cout << "\n--- Consultas SQL de Ejemplo ---" << std::endl;
+    std::cout << "1. Crear tabla:" << std::endl;
+    std::cout << "   CREATE TABLE usuarios (id INT, nombre CHAR, email VARCHAR)" << std::endl;
+    std::cout << "\n2. Insertar datos:" << std::endl;
+    std::cout << "   INSERT INTO usuarios VALUES (1, 'Juan', 'juan@email.com')" << std::endl;
+    std::cout << "\n3. Seleccionar todos los datos:" << std::endl;
+    std::cout << "   SELECT * FROM usuarios" << std::endl;
+    std::cout << "\n4. Seleccionar con condición:" << std::endl;
+    std::cout << "   SELECT nombre, email FROM usuarios WHERE id = 1" << std::endl;
+    std::cout << "\n5. Actualizar datos:" << std::endl;
+    std::cout << "   UPDATE usuarios SET email = 'nuevo@email.com' WHERE id = 1" << std::endl;
+    std::cout << "\n6. Eliminar datos:" << std::endl;
+    std::cout << "   DELETE FROM usuarios WHERE id = 1" << std::endl;
+    std::cout << "\n7. Eliminar tabla:" << std::endl;
+    std::cout << "   DROP TABLE usuarios" << std::endl;
+}
+
 
 // --- Manejadores de Menú ---
 
@@ -993,6 +1128,29 @@ void HandleCatalogManagement() {
     } while (choice != 6);
 }
 
+void HandleQueryProcessor() {
+    if (!g_query_processor) {
+        std::cout << "Query Processor no inicializado. Cree o cargue un disco primero." << std::endl;
+        return;
+    }
+    int choice;
+    do {
+        DisplayQueryProcessorMenu();
+        choice = GetNumericInput<int>("");
+
+        switch (choice) {
+            case 1: ExecuteSQLQuery(); break;
+            case 2: ExecuteSQLQueryVerbose(); break;
+            case 3: ShowLastQueryInfo(); break;
+            case 4: ShowLastExecutionPlan(); break;
+            case 5: ShowLastQueryStats(); break;
+            case 6: ShowExampleQueries(); break;
+            case 7: std::cout << "Volviendo al Menú Principal." << std::endl; break;
+            default: std::cout << "Opción inválida. Intente de nuevo." << std::endl; break;
+        }
+    } while (choice != 7);
+}
+
 
 int main() {
     std::cout << "Directorio de trabajo actual: " << fs::current_path() << std::endl; // Debug output
@@ -1008,7 +1166,7 @@ int main() {
             case 3: HandleDataManagement(); break;
             case 4: HandleCatalogManagement(); break;
             case 5: std::cout << "Gestión de Índices - Funcionalidad no implementada aún." << std::endl; break;
-            case 6: std::cout << "Procesador de Consultas - Funcionalidad no implementada aún." << std::endl; break;
+            case 6: HandleQueryProcessor(); break;
             case 7: std::cout << "Saliendo del SGBD. ¡Adiós!" << std::endl; break;
             default: std::cout << "Opción inválida. Intente de nuevo." << std::endl; break;
         }
