@@ -1,142 +1,127 @@
-// include/common.h
 #ifndef COMMON_H
 #define COMMON_H
 
-#include <cstdint> // Para tipos enteros fijos como uint32_t
-#include <string>  // Para std::string
-#include <vector>  // Para std::vector
-#include <stdexcept> // Para std::invalid_argument
-#include <algorithm> // Para std::fill
+#include <cstdint>   // Para uint32_t, etc.
+#include <string>    // Para std::string
+#include <vector>    // Para std::vector
+#include <stdexcept> // Para excepciones estándar
+#include <algorithm> // Para algoritmos como std::min, std::max
+#include <cstring>   // Para funciones de manipulación de cadenas de C (memset, memcpy)
 
-// Definiciones de tipos comunes
-using PageId = uint32_t;     // Identificador único de una página lógica (bloque)
-using FrameId = uint32_t;    // Identificador único de un frame en el buffer pool
-using BlockId = uint32_t;    // Identificador único de un bloque (añadido)
+// ==== ALIAS DE TIPOS COMUNES ====
+using PageId = uint32_t;        // Identificador de una página (copia de bloque en buffer)
+using FrameId = uint32_t;       // Identificador de un frame en el buffer pool
+using BlockId = uint32_t;       // Identificador de un bloque en el disco
 using BlockSizeType = uint32_t; // Tamaño de un bloque en bytes
 using SectorSizeType = uint32_t; // Tamaño de un sector en bytes
-using Byte = char;           // Representación de un byte de datos
+using Byte = char;              // Tipo para representar un byte de datos
+using RecordId = uint32_t;      // Identificador de un registro dentro de una tabla
 
-// Enumeración para el estado de las operaciones
+// ==== CONSTANTES DEL SISTEMA ====
+const uint32_t BLOCK_SIZE = 4096;          // Tamaño estándar de un bloque en bytes
+const FrameId INVALID_FRAME_ID = UINT32_MAX; // Valor inválido para un ID de frame
+const PageId INVALID_PAGE_ID = UINT32_MAX;   // Valor inválido para un ID de página/bloque
+
+// ==== ESTADO GENERAL DE LAS OPERACIONES ====
 enum class Status : uint8_t {
     OK = 0,
+    SUCCESS,
     ERROR,
     NOT_FOUND,
-    INVALID_PARAMETER,
+    DUPLICATE_ENTRY,
+    DUPLICATE_KEY,
     IO_ERROR,
     DISK_FULL,
     BUFFER_FULL,
+    BUFFER_OVERFLOW,
     PAGE_PINNED,
     INVALID_BLOCK_ID,
     INVALID_PAGE_TYPE,
+    INVALID_ARGUMENT,
+    ALREADY_EXISTS,
+    CANCELLED,
+    RESOURCE_BUSY,
+    OPERATION_FAILED,
     OUT_OF_MEMORY,
-    DUPLICATE_ENTRY // Para CatalogManager
+    OUT_OF_SPACE_FOR_UPDATE,
+    INVALID_PARAMETER,
+    INVALID_FORMAT // Añadido para errores de formato en serialización/deserialización
 };
 
-// Función auxiliar para convertir Status a string (para mensajes de error)
+// Función de utilidad para convertir Status a string (para mensajes de error)
 inline std::string StatusToString(Status status) {
     switch (status) {
         case Status::OK: return "OK";
+        case Status::SUCCESS: return "SUCCESS";
         case Status::ERROR: return "ERROR";
         case Status::NOT_FOUND: return "NOT_FOUND";
-        case Status::INVALID_PARAMETER: return "INVALID_PARAMETER";
+        case Status::DUPLICATE_ENTRY: return "DUPLICATE_ENTRY";
+        case Status::DUPLICATE_KEY: return "DUPLICATE_KEY";
         case Status::IO_ERROR: return "IO_ERROR";
         case Status::DISK_FULL: return "DISK_FULL";
         case Status::BUFFER_FULL: return "BUFFER_FULL";
+        case Status::BUFFER_OVERFLOW: return "BUFFER_OVERFLOW";
         case Status::PAGE_PINNED: return "PAGE_PINNED";
         case Status::INVALID_BLOCK_ID: return "INVALID_BLOCK_ID";
         case Status::INVALID_PAGE_TYPE: return "INVALID_PAGE_TYPE";
+        case Status::INVALID_ARGUMENT: return "INVALID_ARGUMENT";
+        case Status::ALREADY_EXISTS: return "ALREADY_EXISTS";
+        case Status::CANCELLED: return "CANCELLED";
+        case Status::RESOURCE_BUSY: return "RESOURCE_BUSY";
+        case Status::OPERATION_FAILED: return "OPERATION_FAILED";
         case Status::OUT_OF_MEMORY: return "OUT_OF_MEMORY";
-        case Status::DUPLICATE_ENTRY: return "DUPLICATE_ENTRY";
+        case Status::OUT_OF_SPACE_FOR_UPDATE: return "OUT_OF_SPACE_FOR_UPDATE";
+        case Status::INVALID_PARAMETER: return "INVALID_PARAMETER";
+        case Status::INVALID_FORMAT: return "INVALID_FORMAT";
         default: return "UNKNOWN_STATUS";
     }
 }
 
-// Enumeración para los tipos de página
-enum class PageType : uint8_t {
-    INVALID_PAGE = 0,
-    DISK_METADATA_PAGE, // Página para metadatos del disco (ej. mapa de bits de sectores)
-    CATALOG_PAGE,       // Página para metadatos del catálogo (esquemas de tablas)
-    DATA_PAGE,          // Página que contiene registros de datos de una tabla
-    INDEX_PAGE          // Página que contiene entradas de un índice
-};
-
-// Función auxiliar para convertir PageType a string
-inline std::string PageTypeToString(PageType type) {
-    switch (type) {
-        case PageType::INVALID_PAGE: return "INVALID_PAGE";
-        case PageType::DISK_METADATA_PAGE: return "DISK_METADATA_PAGE";
-        case PageType::CATALOG_PAGE: return "CATALOG_PAGE";
-        case PageType::DATA_PAGE: return "DATA_PAGE";
-        case PageType::INDEX_PAGE: return "INDEX_PAGE";
-        default: return "UNKNOWN_PAGE_TYPE";
-    }
-}
-
-// Enumeración para el estado de un bloque físico en el disco
-enum class BlockStatus : uint8_t {
-    EMPTY = 0,      // Bloque completamente libre
-    INCOMPLETE,     // Bloque parcialmente ocupado (tiene espacio libre)
-    FULL            // Bloque completamente ocupado
-};
-
-// Función auxiliar para convertir BlockStatus a string
-inline std::string BlockStatusToString(BlockStatus status) {
-    switch (status) {
-        case BlockStatus::EMPTY: return "EMPTY";
-        case BlockStatus::INCOMPLETE: return "INCOMPLETE";
-        case BlockStatus::FULL: return "FULL";
-        default: return "UNKNOWN_BLOCK_STATUS";
-    }
-}
-
-// Enumeración para los tipos de columnas (datos) - MOVIDO AQUÍ
+// ==== TIPOS DE COLUMNAS (UNIFICADO) ====
 enum class ColumnType : uint8_t {
-    INT = 0,
-    CHAR,
-    VARCHAR,
-    // Otros tipos de datos pueden ser añadidos aquí (FLOAT, DATE, etc.)
+    INT = 0,     // Enteros
+    VARCHAR,     // Cadenas de longitud variable (STRING en tu original)
+    CHAR,        // Cadenas de longitud fija
+    REAL,        // Números de punto flotante
+    BOOL         // Valores booleanos
 };
 
-// Función auxiliar para convertir ColumnType a string - MOVIDO AQUÍ
+// Función de utilidad para convertir ColumnType a string
 inline std::string ColumnTypeToString(ColumnType type) {
     switch (type) {
         case ColumnType::INT: return "INT";
-        case ColumnType::CHAR: return "CHAR";
         case ColumnType::VARCHAR: return "VARCHAR";
+        case ColumnType::CHAR: return "CHAR";
+        case ColumnType::REAL: return "REAL";
+        case ColumnType::BOOL: return "BOOL";
         default: return "UNKNOWN_COLUMN_TYPE";
     }
 }
 
-// NUEVA ESTRUCTURA: Metadata de una columna
-// Esta será parte del esquema de la tabla.
+// Función de utilidad para convertir string a ColumnType
+inline ColumnType StringToColumnType(const std::string& type_str) {
+    std::string upper_type_str = type_str;
+    std::transform(upper_type_str.begin(), upper_type_str.end(), upper_type_str.begin(), ::toupper);
+    if (upper_type_str == "INT") return ColumnType::INT;
+    if (upper_type_str == "VARCHAR") return ColumnType::VARCHAR;
+    if (upper_type_str == "CHAR") return ColumnType::CHAR;
+    if (upper_type_str == "REAL") return ColumnType::REAL;
+    if (upper_type_str == "BOOL") return ColumnType::BOOL;
+    return ColumnType::INT; // Valor por defecto o error
+}
+
+
+// ==== METADATA DE COLUMNA (Usando std::string para nombres) ====
 struct ColumnMetadata {
-    char name[64];      // Nombre de la columna (fijo para serialización)
-    ColumnType type;    // Tipo de dato de la columna
-    uint32_t size;      // Tamaño para CHAR (longitud fija), para INT (sizeof(int)),
-                        // para VARCHAR (tamaño máximo permitido).
+    std::string name;       // Nombre de la columna
+    ColumnType type;        // Tipo de dato de la columna
+    uint32_t size;          // Tamaño para CHAR/VARCHAR, 0 para INT/REAL/BOOL
+    bool is_primary_key;    // Indica si es parte de la clave primaria
+    bool is_nullable;       // Indica si la columna puede contener valores nulos
 
-    ColumnMetadata() : type(ColumnType::INT), size(0) {
-        std::fill(name, name + 64, 0); // Inicializar con ceros
-    }
-};
-
-// NUEVA ESTRUCTURA: Metadata de una tabla
-// Esta será el "registro" que el CatalogManager guardará en CATALOG_PAGEs.
-struct TableMetadata {
-    uint32_t table_id;              // Identificador único de la tabla
-    char table_name[64];            // Nombre de la tabla (fijo para serialización)
-    bool is_fixed_length_record;    // true si todos los registros de esta tabla son de longitud fija
-    std::vector<PageId> data_page_ids; // Lista de PageIds que pertenecen a esta tabla
-    uint32_t num_records;           // Número total de registros en la tabla (puede ser aproximado)
-                                    // Este campo se actualizará con Insert/DeleteRecord
-
-    // Para registros de longitud fija:
-    uint32_t fixed_record_size;     // Tamaño total de un registro fijo (incluyendo delimitadores si los hubiera)
-
-    TableMetadata() : table_id(0), is_fixed_length_record(true),
-                      num_records(0), fixed_record_size(0) {
-        std::fill(table_name, table_name + 64, 0); // Inicializar con ceros
-    }
+    ColumnMetadata() : name(""), type(ColumnType::INT), size(0), is_primary_key(false), is_nullable(true) {}
+    ColumnMetadata(const std::string& n, ColumnType t, uint32_t s = 0, bool pk = false, bool nl = true)
+        : name(n), type(t), size(s), is_primary_key(pk), is_nullable(nl) {}
 };
 
 #endif // COMMON_H
